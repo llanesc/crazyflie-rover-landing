@@ -31,7 +31,6 @@ environment:
   corridor_transition: 0.1   # m — sigmoid blend width
   max_descent_speed: 0.5     # m/s — max descent speed in corridor
 
-
 rewards:
   landing: 100.0
   crash: -50.0
@@ -48,6 +47,7 @@ rewards:
   altitude_floor_coef: 0.3      # penalty for being below altitude floor during navigation
   time_penalty: 0.0             # per-step cost to discourage hovering
   rover_stillness_coef: 0.5    # penalty for rover speed when drone is in landing corridor
+  rover_yawrate_coef: 0.5      # penalty for rover yaw rate when drone is in landing corridor
   drone_velocity_coef: 0.05     # penalty for drone speed
   rover_boundary_coef: 1.0    # per-step penalty for rover at arena boundary
 

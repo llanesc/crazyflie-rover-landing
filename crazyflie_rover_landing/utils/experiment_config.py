@@ -105,6 +105,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
         "altitude_floor_coef": "reward_altitude_floor_coef",
         "time_penalty": "reward_time_penalty",
         "rover_stillness_coef": "reward_rover_stillness_coef",
+        "rover_yawrate_coef": "reward_rover_yawrate_coef",
         "drone_velocity_coef": "reward_drone_velocity_coef",
         "rover_boundary_coef": "reward_rover_boundary_coef",
     }
