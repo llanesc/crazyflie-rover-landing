@@ -1,7 +1,6 @@
 """Centralized value network for MAPPO (CTDE).
 
-Single shared trunk with per-agent output heads. Both agents share the
-same feature extractor; each gets its own scalar value output.
+Ported from crazyflie-mape-crazyflow shared_critic.py without changes.
 """
 
 from typing import Mapping, Sequence, Tuple, Union
@@ -23,76 +22,46 @@ def _get_activation(name: str) -> type[nn.Module]:
     return activations[name.lower()]
 
 
-class DualHeadCriticBackbone(nn.Module):
-    """Shared trunk with 2 value heads (drone, rover).
-
-    Architecture:
-        shared_state (22D) → trunk (hidden layers) → features
-        features → drone_head → scalar
-        features → rover_head → scalar
-    """
-
-    def __init__(
-        self,
-        obs_dim: int,
-        hidden_sizes: Sequence[int] = (256, 256),
-        activation: str = "relu",
-    ):
-        super().__init__()
-        act_cls = _get_activation(activation)
-
-        # Build trunk: obs_dim → hidden layers → last hidden dim
-        layers: list[nn.Module] = []
-        prev = obs_dim
-        for size in hidden_sizes:
-            layers.append(nn.Linear(prev, size))
-            layers.append(act_cls())
-            prev = size
-        self.trunk = nn.Sequential(*layers)
-
-        # Per-agent output heads
-        self.drone_head = nn.Linear(prev, 1)
-        self.rover_head = nn.Linear(prev, 1)
-
-    def forward(self, x: torch.Tensor, head_index: int) -> torch.Tensor:
-        """Run trunk and select one head.
-
-        Args:
-            x: (B, obs_dim) shared state.
-            head_index: 0 for drone, 1 for rover.
-
-        Returns:
-            (B, 1) scalar value.
-        """
-        features = self.trunk(x)
-        if head_index == 0:
-            return self.drone_head(features)
-        else:
-            return self.rover_head(features)
+def _build_mlp(
+    input_dim: int,
+    hidden_sizes: Sequence[int],
+    output_dim: int,
+    activation: str = "relu",
+) -> nn.Sequential:
+    act_cls = _get_activation(activation)
+    layers: list[nn.Module] = []
+    prev = input_dim
+    for size in hidden_sizes:
+        layers.append(nn.Linear(prev, size))
+        layers.append(act_cls())
+        prev = size
+    layers.append(nn.Linear(prev, output_dim))
+    return nn.Sequential(*layers)
 
 
-class CriticHead(DeterministicMixin, Model):
-    """SKRL-compatible wrapper that selects one output from a shared backbone.
+class SharedCritic(DeterministicMixin, Model):
+    """SKRL centralized value network for MAPPO.
 
     Input: shared state (drone + rover full state, 22D).
-    Output: scalar state value for the assigned agent.
+    Output: scalar state value.
     """
 
     def __init__(
         self,
         observation_space: gymnasium.Space,
         action_space: gymnasium.Space,
-        backbone: DualHeadCriticBackbone,
-        head_index: int,
         device: Union[str, torch.device] = "cpu",
         clip_actions: bool = False,
+        value_net_sizes: Sequence[int] = (256, 256),
+        activation: str = "relu",
         **kwargs,
     ):
         Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         DeterministicMixin.__init__(self, clip_actions=clip_actions)
 
-        self.backbone = backbone
-        self.head_index = head_index
+        obs_dim = gymnasium.spaces.flatdim(observation_space)
+
+        self.value_net = _build_mlp(obs_dim, value_net_sizes, 1, activation=activation)
 
     def compute(
         self,
@@ -105,6 +74,6 @@ class CriticHead(DeterministicMixin, Model):
             state = inputs.get("shared_states", inputs.get("observations", None))
 
         if state is None:
-            raise ValueError("No state found in inputs for CriticHead.")
+            raise ValueError("No state found in inputs for SharedCritic.")
 
-        return self.backbone(state, self.head_index), {}
+        return self.value_net(state), {}
