@@ -276,6 +276,7 @@ def _jit_compute_rewards(
     reward_altitude_floor_coef: float,
     reward_time_penalty: float,
     reward_rover_stillness_coef: float,
+    reward_rover_yawrate_coef: float,
     reward_drone_velocity_coef: float,
     reward_rover_boundary_coef: float,
     map_half_x: float,
@@ -329,6 +330,10 @@ def _jit_compute_rewards(
     # Rover stillness — penalize rover speed when drone is in landing corridor
     rover_speed = jnp.abs(rover_state[:, 4])
     r_rover_stillness = -reward_rover_stillness_coef * z_weight * rover_speed ** 2
+
+    # Rover yaw rate penalty — penalize heading changes when drone is in landing corridor
+    rover_omega = rover_cmd[:, 1]  # yaw rate command
+    r_rover_yawrate = -reward_rover_yawrate_coef * z_weight * rover_omega ** 2
 
     # Rover boundary penalty: penalize rover being at arena edge
     rover_at_boundary = (
@@ -386,7 +391,7 @@ def _jit_compute_rewards(
     team = r_xy + r_z + r_landing + r_time
     drone_only = (r_descent + r_altitude + r_drone_velocity + r_angle
                   + r_smooth_drone + r_crash + r_boundary)
-    rover_only = r_rover_stillness + r_smooth_rover + r_rover_boundary
+    rover_only = r_rover_stillness + r_rover_yawrate + r_smooth_rover + r_rover_boundary
 
     drone_reward = team + drone_only
     rover_reward = team + rover_only
@@ -404,6 +409,7 @@ def _jit_compute_rewards(
         "boundary": r_boundary,
         "time": r_time,
         "rover_stillness": r_rover_stillness,
+        "rover_yawrate": r_rover_yawrate,
         "rover_boundary": r_rover_boundary,
         "drone_velocity": r_drone_velocity,
     }
@@ -903,6 +909,7 @@ class LandingEnv(gym.Env):
             self.cfg.reward_altitude_floor_coef,
             self.cfg.reward_time_penalty,
             self.cfg.reward_rover_stillness_coef,
+            self.cfg.reward_rover_yawrate_coef,
             self.cfg.reward_drone_velocity_coef,
             self.cfg.reward_rover_boundary_coef,
             self.cfg.map_half_x,
@@ -1010,35 +1017,17 @@ class LandingEnv(gym.Env):
             rel_pos,                            # 3
         ], axis=-1).astype(np.float32)  # 28D
 
-        # ---- Rover observation (13D) — body-frame ----
-        cos_t = rover_c  # (N,)
-        sin_t = rover_s  # (N,)
-
-        # Drone position relative to rover, rotated into rover body frame
-        # body_rel = R(-θ) @ (drone_pos - rover_pos)   (rel_pos = drone - rover)
-        body_rel_x = cos_t * rel_pos[:, 0] + sin_t * rel_pos[:, 1]
-        body_rel_y = -sin_t * rel_pos[:, 0] + cos_t * rel_pos[:, 1]
-        body_rel_z = rel_pos[:, 2]  # Z is frame-independent
-
-        # Drone velocity in rover body frame
-        body_vel_x = cos_t * drone_vel[:, 0] + sin_t * drone_vel[:, 1]
-        body_vel_y = -sin_t * drone_vel[:, 0] + cos_t * drone_vel[:, 1]
-        body_vel_z = drone_vel[:, 2]  # Z is frame-independent
-
+        # ---- Rover observation (13D) — world-frame ----
         drone_speed = np.linalg.norm(drone_vel, axis=-1, keepdims=True)  # (N, 1)
         dist = np.linalg.norm(rel_pos, axis=-1, keepdims=True)           # (N, 1)
 
         rover_obs = np.concatenate([
             rover_xy,                                   # 2  world position (boundary awareness)
-            cos_t[:, None],                             # 1  rot matrix row 1 col 1
-            sin_t[:, None],                             # 1  rot matrix row 1 col 2 (= -row 2 col 1)
+            rover_c[:, None],                           # 1  cos(heading)
+            rover_s[:, None],                           # 1  sin(heading)
             rover_v[:, None],                           # 1  → 5  (self)
-            body_rel_x[:, None],                        # 1  drone pos in body frame (forward)
-            body_rel_y[:, None],                        # 1  drone pos in body frame (left)
-            body_rel_z[:, None],                        # 1  → 8  drone pos in body frame (up)
-            body_vel_x[:, None],                        # 1  drone vel in body frame (forward)
-            body_vel_y[:, None],                        # 1  drone vel in body frame (left)
-            body_vel_z[:, None],                        # 1  → 11  drone vel in body frame (up)
+            rel_pos,                                    # 3  → 8  drone - rover (world frame)
+            drone_vel,                                  # 3  → 11  drone velocity (world frame)
             drone_speed,                                # 1  → 12  drone speed scalar
             dist,                                       # 1  → 13  Euclidean distance
         ], axis=-1).astype(np.float32)  # 13D

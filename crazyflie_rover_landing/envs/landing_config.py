@@ -130,6 +130,7 @@ class LandingEnvConfig:
     reward_altitude_floor_coef: float = 0.5   # Penalty for being below altitude floor during navigation
     reward_time_penalty: float = 0.0          # Per-step cost to discourage hovering
     reward_rover_stillness_coef: float = 0.5 # Penalty for rover speed when drone is in landing corridor
+    reward_rover_yawrate_coef: float = 0.5  # Penalty for rover yaw rate when drone is in landing corridor
     reward_drone_velocity_coef: float = 0.1  # Penalty for drone speed
     reward_rover_boundary_coef: float = 1.0  # Per-step penalty for rover at arena boundary
 
