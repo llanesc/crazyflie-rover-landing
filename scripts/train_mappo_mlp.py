@@ -38,7 +38,12 @@ from torch.optim.lr_scheduler import LinearLR, StepLR
 
 from crazyflie_rover_landing.envs import LandingEnv, LandingEnvConfig, RescaleActionWrapper
 from crazyflie_rover_landing.envs.spawn import create_spawn_fn_from_config
-from crazyflie_rover_landing.policies import MLPGaussianPolicy, SharedCritic
+import gymnasium
+from crazyflie_rover_landing.policies import MLPGaussianPolicy
+from crazyflie_rover_landing.policies.shared_critic import (
+    DualHeadCriticBackbone,
+    CriticHead,
+)
 from crazyflie_rover_landing.preprocessors import PartialRunningStandardScaler
 from crazyflie_rover_landing.utils import (
     load_experiment_config,
@@ -524,25 +529,29 @@ def main():
         initial_log_std=r_cfg["initial_log_std"],
     )
 
-    drone_critic = SharedCritic(
+    critic_backbone = DualHeadCriticBackbone(
+        obs_dim=gymnasium.spaces.flatdim(raw_env.shared_observation_space),
+        hidden_sizes=policy_cfg.get("value_net_sizes", [256, 256]),
+        activation=policy_cfg.get("value_activation", "relu"),
+    ).to(device)
+    drone_critic = CriticHead(
         observation_space=raw_env.shared_observation_space,
         action_space=drone_act_space,  # dummy (critic doesn't use action_space)
+        backbone=critic_backbone,
+        head_index=0,
         device=device,
-        value_net_sizes=policy_cfg.get("value_net_sizes", [256, 256]),
-        activation=policy_cfg.get("value_activation", "relu"),
     )
-    rover_critic = SharedCritic(
+    rover_critic = CriticHead(
         observation_space=raw_env.shared_observation_space,
         action_space=rover_act_space,  # dummy (critic doesn't use action_space)
+        backbone=critic_backbone,
+        head_index=1,
         device=device,
-        value_net_sizes=policy_cfg.get("value_net_sizes", [256, 256]),
-        activation=policy_cfg.get("value_activation", "relu"),
     )
 
     print(f"Drone policy params: {sum(p.numel() for p in drone_policy.parameters() if p.requires_grad)}")
     print(f"Rover policy params: {sum(p.numel() for p in rover_policy.parameters() if p.requires_grad)}")
-    print(f"Drone critic params: {sum(p.numel() for p in drone_critic.parameters() if p.requires_grad)}")
-    print(f"Rover critic params: {sum(p.numel() for p in rover_critic.parameters() if p.requires_grad)}")
+    print(f"Critic backbone params: {sum(p.numel() for p in critic_backbone.parameters() if p.requires_grad)}")
 
     # Models dict: each agent has its own policy and value network
     models = {

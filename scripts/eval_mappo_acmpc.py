@@ -23,6 +23,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import logging
 logging.getLogger("jax._src.xla_bridge").setLevel(logging.WARNING)
 
+import gymnasium
 import numpy as np
 import torch
 
@@ -32,7 +33,10 @@ from crazyflie_rover_landing.envs.spawn import create_spawn_fn_from_config
 from crazyflie_rover_landing.policies import (
     DroneACMPCGaussianPolicy,
     RoverACMPCGaussianPolicy,
-    SharedCritic,
+)
+from crazyflie_rover_landing.policies.shared_critic import (
+    DualHeadCriticBackbone,
+    CriticHead,
 )
 from crazyflie_rover_landing.preprocessors import PartialRunningStandardScaler
 from crazyflie_rover_landing.utils import (
@@ -310,19 +314,24 @@ def main():
         pos_offset_max=r_cfg["pos_offset_max"],
     )
 
-    drone_critic = SharedCritic(
+    critic_backbone = DualHeadCriticBackbone(
+        obs_dim=gymnasium.spaces.flatdim(raw_env.shared_observation_space),
+        hidden_sizes=policy_cfg.get("value_net_sizes", [256, 256]),
+        activation=policy_cfg.get("value_activation", "relu"),
+    ).to(device)
+    drone_critic = CriticHead(
         observation_space=raw_env.shared_observation_space,
         action_space=env_skrl.action_space("drone"),
+        backbone=critic_backbone,
+        head_index=0,
         device=device,
-        value_net_sizes=policy_cfg.get("value_net_sizes", [256, 256]),
-        activation=policy_cfg.get("value_activation", "relu"),
     )
-    rover_critic = SharedCritic(
+    rover_critic = CriticHead(
         observation_space=raw_env.shared_observation_space,
         action_space=env_skrl.action_space("rover"),
+        backbone=critic_backbone,
+        head_index=1,
         device=device,
-        value_net_sizes=policy_cfg.get("value_net_sizes", [256, 256]),
-        activation=policy_cfg.get("value_activation", "relu"),
     )
 
     models = {
