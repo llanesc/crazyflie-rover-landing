@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environments
+local_env/
+
+# IDE / tools
+.vscode/
+.idea/
+.claude/
+
+# OS
+.DS_Store
+
+# Secrets
+.env
+
+# Training artifacts (keep config, ignore large outputs)
+results/acmpc/*/results/
