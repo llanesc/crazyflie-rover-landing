@@ -1,9 +1,9 @@
-"""SKRL Gaussian policy for the unicycle rover using LEAP-C (LINEAR_LS).
+"""SKRL Gaussian policy for the TurtleBot3 Burger rover using LEAP-C (LINEAR_LS).
 
 obs (B, obs_dim) → W + y_ref → MPC → u0 (B, 2) → normalized in [-1, 1]
 
-State [5D]:   [x, y, cos(θ), sin(θ), v]
-Control [2D]: [a, ω]
+State [6D]:   [x, y, cos(θ), sin(θ), v_L, v_R]
+Control [2D]: [ω_L_cmd, ω_R_cmd]  (wheel angular velocity commands, rad/s)
 """
 
 from typing import Mapping, Optional, Sequence, Tuple, Union
@@ -19,10 +19,8 @@ from crazyflie_rover_landing.leap_c.rover_planner import RoverPlanner, RoverPlan
 from crazyflie_rover_landing.leap_c.rover_ocp_linear_ls import (
     NX_ROVER,
     NU_ROVER,
-    _MAX_SPEED,
-    _MIN_SPEED,
-    _MAX_OMEGA,
-    _MAX_ACCEL,
+    _WHEEL_VEL_MAX,
+    _WHEEL_LIN_VEL_MAX,
 )
 
 
@@ -69,10 +67,8 @@ class RoverMPCLayerLinearLS(nn.Module):
         mpc_dt: float = 0.1,
         cost_net_sizes: Sequence[int] = (256, 256),
         device: Union[str, torch.device] = "cpu",
-        max_speed: float = _MAX_SPEED,
-        min_speed: float = _MIN_SPEED,
-        max_omega: float = _MAX_OMEGA,
-        max_accel: float = _MAX_ACCEL,
+        wheel_vel_max: float = _WHEEL_VEL_MAX,
+        wheel_lin_vel_max: float = _WHEEL_LIN_VEL_MAX,
         n_batch_max: int = 4096,
         num_threads: int = 8,
         activation: str = "relu",
@@ -87,39 +83,33 @@ class RoverMPCLayerLinearLS(nn.Module):
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             pos_offset_max=pos_offset_max,
-            max_speed=max_speed,
-            min_speed=min_speed,
-            max_omega=max_omega,
-            max_accel=max_accel,
+            wheel_vel_max=wheel_vel_max,
+            wheel_lin_vel_max=wheel_lin_vel_max,
         )
         self.planner = RoverPlanner(cfg=planner_cfg)
 
-        # Action normalization
-        accel_mean = 0.0
-        accel_scale = max_accel
-        omega_mean = 0.0
-        omega_scale = max_omega
-        self.register_buffer("action_mean", torch.tensor([accel_mean, omega_mean], dtype=torch.float32))
-        self.register_buffer("action_scale", torch.tensor([accel_scale, omega_scale], dtype=torch.float32))
+        # Action normalization: both wheel commands scaled by wheel_vel_max
+        self.register_buffer("action_mean",  torch.zeros(2,  dtype=torch.float32))
+        self.register_buffer("action_scale", torch.tensor([wheel_vel_max, wheel_vel_max], dtype=torch.float32))
 
-        # Weight log-scale bounds: [x, y, c, s, v]
-        self.register_buffer("w_state_min_log", torch.tensor([-2., -2., -2., -2., -2.]))
-        self.register_buffer("w_state_max_log", torch.tensor([2., 2., 1., 1., 1.]))
-        # [a, ω]
+        # Weight log-scale bounds — state: [x, y, c, s, v_L, v_R]
+        self.register_buffer("w_state_min_log", torch.tensor([-2., -2., -2., -2., -2., -2.]))
+        self.register_buffer("w_state_max_log", torch.tensor([ 2.,  2.,  1.,  1.,  1.,  1.]))
+        # Control: [ω_L_cmd, ω_R_cmd]
         self.register_buffer("w_ctrl_min_log", torch.tensor([-2., -2.]))
-        self.register_buffer("w_ctrl_max_log", torch.tensor([1., 1.]))
+        self.register_buffer("w_ctrl_max_log", torch.tensor([ 1.,  1.]))
 
         # Reference bounds
         self.register_buffer("pos_offset_min_buf", torch.tensor([-pos_offset_max, -pos_offset_max]))
-        self.register_buffer("pos_offset_max_buf", torch.tensor([pos_offset_max, pos_offset_max]))
+        self.register_buffer("pos_offset_max_buf", torch.tensor([ pos_offset_max,  pos_offset_max]))
         self.register_buffer("yref_cs_min", torch.tensor([-1.0, -1.0]))
-        self.register_buffer("yref_cs_max", torch.tensor([1.0, 1.0]))
-        self.register_buffer("yref_v_min", torch.tensor([min_speed]))
-        self.register_buffer("yref_v_max", torch.tensor([max_speed]))
-        self.register_buffer("yref_ctrl_min", torch.tensor([-max_accel, -max_omega]))
-        self.register_buffer("yref_ctrl_max", torch.tensor([max_accel, max_omega]))
+        self.register_buffer("yref_cs_max", torch.tensor([ 1.0,  1.0]))
+        self.register_buffer("yref_vw_min", torch.tensor([-wheel_lin_vel_max, -wheel_lin_vel_max]))
+        self.register_buffer("yref_vw_max", torch.tensor([ wheel_lin_vel_max,  wheel_lin_vel_max]))
+        self.register_buffer("yref_ctrl_min", torch.tensor([-wheel_vel_max, -wheel_vel_max]))
+        self.register_buffer("yref_ctrl_max", torch.tensor([ wheel_vel_max,  wheel_vel_max]))
 
-        # param_dim = w_state(5) + w_ctrl(2) + yref_state(5) + yref_ctrl(2) = 14
+        # param_dim = w_state(6) + w_ctrl(2) + yref_state(6) + yref_ctrl(2) = 16
         self.param_dim = self.planner.get_learnable_param_dim()
 
         self.cost_net = _build_mlp(
@@ -131,28 +121,26 @@ class RoverMPCLayerLinearLS(nn.Module):
         """Forward pass.
 
         Args:
-            obs: (B, obs_dim) observations (potentially normalized).
-            state: (B, 5) raw rover MPC state [x, y, c, s, v].
+            obs:   (B, obs_dim) observations.
+            state: (B, 6) raw rover MPC state [x, y, c, s, v_L, v_R].
 
         Returns:
             (B, 2) normalized action in [-1, 1].
         """
         raw = self.cost_net(obs)
-        params = self._scale_params(raw, obs.shape[0], state)
+        params = self._scale_params(raw, state)
         _, u0, _, _, _ = self.planner(obs=state, param=params)
         return (u0 - self.action_mean) / self.action_scale
 
-    def _scale_params(
-        self, net_out: torch.Tensor, batch_size: int, state: torch.Tensor
-    ) -> torch.Tensor:
-        """Scale [0,1] network output to rover MPC parameters (global interface).
+    def _scale_params(self, net_out: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        """Scale [0,1] network output to rover MPC parameters.
 
-        Layout: w_state(5) + w_ctrl(2) + yref_state(5) + yref_ctrl(2) = 14
+        Layout: w_state(6) + w_ctrl(2) + yref_state(6) + yref_ctrl(2) = 16
         """
-        w_state_raw = net_out[:, :NX_ROVER]
-        w_ctrl_raw = net_out[:, NX_ROVER:NX_ROVER + NU_ROVER]
-        yref_state_raw = net_out[:, NX_ROVER + NU_ROVER:NX_ROVER + NU_ROVER + NX_ROVER]
-        yref_ctrl_raw = net_out[:, NX_ROVER + NU_ROVER + NX_ROVER:]
+        w_state_raw    = net_out[:, :NX_ROVER]
+        w_ctrl_raw     = net_out[:, NX_ROVER:NX_ROVER + NU_ROVER]
+        yref_state_raw = net_out[:, NX_ROVER + NU_ROVER:2 * NX_ROVER + NU_ROVER]
+        yref_ctrl_raw  = net_out[:, 2 * NX_ROVER + NU_ROVER:]
 
         # Log-scale weights
         log_w_state = self.w_state_min_log + w_state_raw * (self.w_state_max_log - self.w_state_min_log)
@@ -162,18 +150,18 @@ class RoverMPCLayerLinearLS(nn.Module):
 
         # Position reference: relative offset from current rover (x, y)
         pos_offset = self.pos_offset_min_buf + yref_state_raw[:, :2] * (self.pos_offset_max_buf - self.pos_offset_min_buf)
-        current_pos = state[:, :2]  # [x, y] from rover state
+        current_pos = state[:, :2]
         yref_pos = current_pos + pos_offset
 
-        # Heading reference: cos/sin in [-1, 1]
+        # Heading reference
         yref_cs = self.yref_cs_min + yref_state_raw[:, 2:4] * (self.yref_cs_max - self.yref_cs_min)
 
-        # Speed reference (absolute)
-        yref_v = self.yref_v_min + yref_state_raw[:, 4:5] * (self.yref_v_max - self.yref_v_min)
+        # Wheel velocity references
+        yref_vw = self.yref_vw_min + yref_state_raw[:, 4:6] * (self.yref_vw_max - self.yref_vw_min)
 
-        yref_state = torch.cat([yref_pos, yref_cs, yref_v], dim=-1)
+        yref_state = torch.cat([yref_pos, yref_cs, yref_vw], dim=-1)
 
-        # Control references (absolute)
+        # Control references
         yref_ctrl = self.yref_ctrl_min + yref_ctrl_raw * (self.yref_ctrl_max - self.yref_ctrl_min)
 
         return torch.cat([W_state, W_ctrl, yref_state, yref_ctrl], dim=-1)
@@ -195,10 +183,8 @@ class RoverACMPCGaussianPolicy(GaussianMixin, Model):
         mpc_horizon: int = 4,
         mpc_dt: float = 0.1,
         cost_net_sizes: Sequence[int] = (256, 256),
-        max_speed: float = _MAX_SPEED,
-        min_speed: float = _MIN_SPEED,
-        max_omega: float = _MAX_OMEGA,
-        max_accel: float = _MAX_ACCEL,
+        wheel_vel_max: float = _WHEEL_VEL_MAX,
+        wheel_lin_vel_max: float = _WHEEL_LIN_VEL_MAX,
         n_batch_max: int = 4096,
         num_threads: int = 8,
         activation: str = "relu",
@@ -210,10 +196,10 @@ class RoverACMPCGaussianPolicy(GaussianMixin, Model):
                                min_log_std=min_log_std, max_log_std=max_log_std)
 
         self._g_clip_log_std = clip_log_std
-        self._g_min_log_std = min_log_std
-        self._g_max_log_std = max_log_std
+        self._g_min_log_std  = min_log_std
+        self._g_max_log_std  = max_log_std
 
-        obs_dim = gymnasium.spaces.flatdim(observation_space)
+        obs_dim    = gymnasium.spaces.flatdim(observation_space)
         action_dim = gymnasium.spaces.flatdim(action_space)
 
         self.mpc_layer = RoverMPCLayerLinearLS(
@@ -222,10 +208,8 @@ class RoverACMPCGaussianPolicy(GaussianMixin, Model):
             mpc_dt=mpc_dt,
             cost_net_sizes=cost_net_sizes,
             device=device,
-            max_speed=max_speed,
-            min_speed=min_speed,
-            max_omega=max_omega,
-            max_accel=max_accel,
+            wheel_vel_max=wheel_vel_max,
+            wheel_lin_vel_max=wheel_lin_vel_max,
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             activation=activation,
@@ -250,7 +234,6 @@ class RoverACMPCGaussianPolicy(GaussianMixin, Model):
         if "mpc_state" in inputs:
             state = inputs["mpc_state"]
         else:
-            # Fallback: use first 5 elements of obs as rover state
             state = obs[:, :NX_ROVER]
 
         mean_actions = self.mpc_layer(obs, state)

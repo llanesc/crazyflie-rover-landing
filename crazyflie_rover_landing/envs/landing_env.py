@@ -148,10 +148,10 @@ def _jit_check_landing(
     """
     rover_xy = rover_state[:, :2]
 
-    # Rover velocity in world frame from unicycle state [x, y, c, s, v]
-    c = rover_state[:, 2]
-    s = rover_state[:, 3]
-    v = rover_state[:, 4]
+    # Rover velocity in world frame from differential-drive state [x, y, c, s, v_L, v_R]
+    c   = rover_state[:, 2]
+    s   = rover_state[:, 3]
+    v   = (rover_state[:, 4] + rover_state[:, 5]) * 0.5   # body linear speed
     rover_vx = v * c
     rover_vy = v * s
 
@@ -220,28 +220,30 @@ def _jit_clamp_rover(
     When the rover hits a boundary, its velocity is set to zero.
 
     Args:
-        rover_state: (N, 5) [x, y, c, s, v].
+        rover_state: (N, 6) [x, y, c, s, v_L, v_R].
         map_half_x: Half-width in X [m].
         map_half_y: Half-width in Y [m].
 
     Returns:
         Updated rover_state with clamped position and zeroed velocity on hit.
     """
-    x = rover_state[:, 0]
-    y = rover_state[:, 1]
-    c = rover_state[:, 2]
-    s = rover_state[:, 3]
-    v = rover_state[:, 4]
+    x   = rover_state[:, 0]
+    y   = rover_state[:, 1]
+    c   = rover_state[:, 2]
+    s   = rover_state[:, 3]
+    v_L = rover_state[:, 4]
+    v_R = rover_state[:, 5]
 
-    hit_x = (x < -map_half_x) | (x > map_half_x)
-    hit_y = (y < -map_half_y) | (y > map_half_y)
+    hit_x   = (x < -map_half_x) | (x > map_half_x)
+    hit_y   = (y < -map_half_y) | (y > map_half_y)
     hit_any = hit_x | hit_y
 
-    x_clamped = jnp.clip(x, -map_half_x, map_half_x)
-    y_clamped = jnp.clip(y, -map_half_y, map_half_y)
-    v_clamped = jnp.where(hit_any, 0.0, v)
+    x_clamped   = jnp.clip(x, -map_half_x, map_half_x)
+    y_clamped   = jnp.clip(y, -map_half_y, map_half_y)
+    v_L_clamped = jnp.where(hit_any, 0.0, v_L)
+    v_R_clamped = jnp.where(hit_any, 0.0, v_R)
 
-    return jnp.stack([x_clamped, y_clamped, c, s, v_clamped], axis=-1)
+    return jnp.stack([x_clamped, y_clamped, c, s, v_L_clamped, v_R_clamped], axis=-1)
 
 
 @jax.jit
@@ -296,9 +298,11 @@ def _jit_compute_rewards(
         components: dict of individual reward components, each (N,).
     """
     rover_xy = rover_state[:, :2]
-    c = rover_state[:, 2]
-    s = rover_state[:, 3]
-    v = rover_state[:, 4]
+    c   = rover_state[:, 2]
+    s   = rover_state[:, 3]
+    v_L = rover_state[:, 4]
+    v_R = rover_state[:, 5]
+    v   = (v_L + v_R) * 0.5
 
     # Distances
     horiz_dist = jnp.linalg.norm(drone_pos[:, :2] - rover_xy, axis=-1)
@@ -327,12 +331,12 @@ def _jit_compute_rewards(
     below_floor = jnp.maximum(altitude_floor - drone_pos[:, 2], 0.0)
     r_altitude = -reward_altitude_floor_coef * nav_weight * below_floor
 
-    # Rover stillness — penalize rover speed when drone is in landing corridor
-    rover_speed = jnp.abs(rover_state[:, 4])
+    # Rover stillness — penalize body speed when drone is in landing corridor
+    rover_speed = jnp.abs(v)
     r_rover_stillness = -reward_rover_stillness_coef * z_weight * rover_speed ** 2
 
     # Rover yaw rate penalty — penalize heading changes when drone is in landing corridor
-    rover_omega = rover_cmd[:, 1]  # yaw rate command
+    rover_omega = (rover_state[:, 5] - rover_state[:, 4]) / 0.160   # (v_R - v_L) / wheelbase
     r_rover_yawrate = -reward_rover_yawrate_coef * z_weight * rover_omega ** 2
 
     # Rover boundary penalty: penalize rover being at arena edge
@@ -447,7 +451,7 @@ class LandingEnv(gym.Env):
                 drone_y_half=self.cfg.map_half_y,
                 rover_x_half=self.cfg.map_half_x,
                 rover_y_half=self.cfg.map_half_y,
-                rover_max_speed=self.cfg.rover_max_speed,
+                rover_max_speed=self.cfg.rover_max_speed,  # property: r × wheel_vel_max
             )
         self._spawn_fn = spawn_fn
 
@@ -596,7 +600,7 @@ class LandingEnv(gym.Env):
 
         # MPC state dimensions
         self.drone_mpc_state_dim = 12  # [pos(3), rpy(3), vel(3), drpy(3)]
-        self.rover_mpc_state_dim = 5   # [x, y, c, s, v]
+        self.rover_mpc_state_dim = 6   # [x, y, c, s, v_L, v_R]
 
         # Shared state for centralized critic: 22D
         #   drone: pos(3) + vel(3) + rpy(3) + body_rates(3) = 12
@@ -618,8 +622,8 @@ class LandingEnv(gym.Env):
                                 self.cfg.yaw_max, self.cfg.thrust_max], dtype=np.float32),
             ),
             "rover": spaces.Box(
-                low=np.array([-self.cfg.rover_max_accel, -self.cfg.rover_max_omega], dtype=np.float32),
-                high=np.array([self.cfg.rover_max_accel, self.cfg.rover_max_omega], dtype=np.float32),
+                low=np.array([-self.cfg.rover_wheel_vel_max, -self.cfg.rover_wheel_vel_max], dtype=np.float32),
+                high=np.array([self.cfg.rover_wheel_vel_max, self.cfg.rover_wheel_vel_max], dtype=np.float32),
             ),
         })
         self.action_spaces = self.action_space
@@ -646,10 +650,10 @@ class LandingEnv(gym.Env):
     def _init_state_tensors(self):
         """Initialize JAX state arrays."""
         N = self.cfg.n_worlds
-        self.rover_state = jnp.zeros((N, 5))       # [x, y, c, s, v]
+        self.rover_state = jnp.zeros((N, 6))       # [x, y, c, s, v_L, v_R]
         self.drone_cmd = jnp.zeros((N, 4))         # attitude cmd
         self.last_drone_cmd = jnp.zeros((N, 4))
-        self.rover_cmd = jnp.zeros((N, 2))         # [a, ω]
+        self.rover_cmd = jnp.zeros((N, 2))         # [ω_L_cmd, ω_R_cmd]
         self.last_rover_cmd = jnp.zeros((N, 2))
         self._cached_drone_rpy = None
         self._cached_drone_rpy_rates = None
@@ -839,15 +843,14 @@ class LandingEnv(gym.Env):
 
         # Process and clip rover action
         rover_action = np.array(actions.get("rover", np.zeros((N, 2))), copy=True).reshape(N, 2)
-        rover_action[:, 0] = np.clip(rover_action[:, 0], -self.cfg.rover_max_accel, self.cfg.rover_max_accel)
-        rover_action[:, 1] = np.clip(rover_action[:, 1], -self.cfg.rover_max_omega, self.cfg.rover_max_omega)
+        rover_action[:, 0] = np.clip(rover_action[:, 0], -self.cfg.rover_wheel_vel_max, self.cfg.rover_wheel_vel_max)
+        rover_action[:, 1] = np.clip(rover_action[:, 1], -self.cfg.rover_wheel_vel_max, self.cfg.rover_wheel_vel_max)
         self.rover_cmd = jnp.array(rover_action)
 
         # Step rover dynamics
         self.rover_state = rover_step_batched(
             self.rover_state, self.rover_cmd, self.cfg.dt,
-            self.cfg.rover_max_speed, self.cfg.rover_min_speed,
-            self.cfg.rover_max_omega, self.cfg.rover_max_accel,
+            self.cfg.rover_wheel_vel_max,
         )
         # Clamp rover to arena
         self.rover_state = _jit_clamp_rover(
@@ -995,11 +998,11 @@ class LandingEnv(gym.Env):
         self._cached_drone_rpy_rates = drone_rpy_rates
         self._cached_drone_rotmat_flat = drone_rotmat_flat
 
-        rover = np.asarray(self.rover_state)  # (N, 5): [x, y, c, s, v]
+        rover = np.asarray(self.rover_state)  # (N, 6): [x, y, c, s, v_L, v_R]
         rover_xy = rover[:, :2]
         rover_c = rover[:, 2]
         rover_s = rover[:, 3]
-        rover_v = rover[:, 4]
+        rover_v = (rover[:, 4] + rover[:, 5]) * 0.5   # body linear speed
         rover_vel_xy = rover_v[:, None] * np.stack([rover_c, rover_s], axis=-1)
 
         # ---- Drone observation (28D) ----
@@ -1045,7 +1048,7 @@ class LandingEnv(gym.Env):
         rover_xy = rover[:, :2]
         rover_c = rover[:, 2]
         rover_s = rover[:, 3]
-        rover_v = rover[:, 4]
+        rover_v = (rover[:, 4] + rover[:, 5]) * 0.5   # body linear speed
         rover_vel_xy = rover_v[:, None] * np.stack([rover_c, rover_s], axis=-1)
 
         if self._cached_drone_rpy is not None:
@@ -1161,10 +1164,51 @@ class LandingEnv(gym.Env):
             "rgba": rgba.astype(np.float32),
         })
 
-    def render(self, world: int = 0) -> np.ndarray | None:
-        """Render the environment using MuJoCo with the rover drawn as markers.
+    def _build_render_model(self):
+        """Build a combined render-only MuJoCo model: drone scene + TurtleBot3 Burger.
 
-        The drone is rendered via Crazyflow's MuJoCo model.
+        Replicates Crazyflow's build_mjx_spec() and attaches the burger model
+        with prefix "rover_". The resulting model/data are used solely for
+        visualization; physics remain in self.sim.mj_model / JAX.
+        """
+        import mujoco
+        from pathlib import Path
+
+        burger_xml = (
+            Path(__file__).parents[2]
+            / "external/robotis_mujoco_menagerie/robotis_tb3/turtlebot3_burger.xml"
+        )
+
+        # Build fresh spec matching Crazyflow's build_mjx_spec
+        spec = mujoco.MjSpec.from_file(str(self.sim._xml_path))
+        spec.option.timestep = 1 / self.sim.freq
+        spec.copy_during_attach = True
+        drone_spec = mujoco.MjSpec.from_file(str(self.sim.drone_path))
+        frame = spec.worldbody.add_frame(name="world")
+        for i in range(self.sim.n_drones):
+            drone_body = drone_spec.body("drone")
+            drone = frame.attach_body(drone_body, "", f":{i}")
+            drone.add_freejoint()
+
+        # Attach burger with "rover_" prefix (burger already has a free joint)
+        burger_spec = mujoco.MjSpec.from_file(str(burger_xml))
+        rover_frame = spec.worldbody.add_frame(name="rover_world")
+        burger_base = burger_spec.body("base")
+        rover_frame.attach_body(burger_base, "rover_", "")
+
+        self._render_model = spec.compile()
+        self._render_data = mujoco.MjData(self._render_model)
+
+        # Cache rover free-joint qpos address
+        rover_joint_id = mujoco.mj_name2id(
+            self._render_model, mujoco.mjtObj.mjOBJ_JOINT, "rover_base_joint"
+        )
+        self._rover_qpos_addr = int(self._render_model.jnt_qposadr[rover_joint_id])
+
+    def render(self, world: int = 0) -> np.ndarray | None:
+        """Render the environment using MuJoCo with the TurtleBot3 Burger mesh.
+
+        The drone is rendered via a combined render model (drone + burger).
 
         Args:
             world: Which parallel world to render (default 0).
@@ -1175,12 +1219,13 @@ class LandingEnv(gym.Env):
         import mujoco
         from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 
-        # Initialize viewer if needed (same pattern as MAPE)
+        # Initialize viewer if needed
         if self.sim.viewer is None:
+            self._build_render_model()
             w = getattr(self, '_render_width', 1920)
             h = getattr(self, '_render_height', 1080)
-            self.sim.mj_model.vis.global_.offwidth = w
-            self.sim.mj_model.vis.global_.offheight = h
+            self._render_model.vis.global_.offwidth = w
+            self._render_model.vis.global_.offheight = h
             cam_config = {
                 "distance": 12.0,
                 "azimuth": 90.0,
@@ -1191,8 +1236,8 @@ class LandingEnv(gym.Env):
             overrides = getattr(self, '_cam_overrides', {})
             cam_config.update(overrides)
             self.sim.viewer = MujocoRenderer(
-                self.sim.mj_model,
-                self.sim.mj_data,
+                self._render_model,
+                self._render_data,
                 max_geom=self.sim.max_visual_geom,
                 default_cam_config=cam_config,
                 height=h,
@@ -1200,12 +1245,12 @@ class LandingEnv(gym.Env):
                 camera_id=-1,
             )
             # Disable floor reflection and shadows
-            floor_id = mujoco.mj_name2id(self.sim.mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+            floor_id = mujoco.mj_name2id(self._render_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
             if floor_id >= 0:
-                mat_id = self.sim.mj_model.geom_matid[floor_id]
+                mat_id = self._render_model.geom_matid[floor_id]
                 if mat_id >= 0:
-                    self.sim.mj_model.mat_reflectance[mat_id] = 0.0
-            self.sim.mj_model.vis.quality.shadowsize = 0
+                    self._render_model.mat_reflectance[mat_id] = 0.0
+            self._render_model.vis.quality.shadowsize = 0
 
         # Clear trajectory if pending (deferred from auto-reset so the final
         # render of the previous episode still shows the full trajectory)
@@ -1227,21 +1272,24 @@ class LandingEnv(gym.Env):
             drone_quat = np.asarray(states.quat[world, 0])  # (4,) xyzw
             rover_for_render = None  # use current state
 
+        # Set drone pose in render data (Crazyflow xyzw → MuJoCo qpos wxyz)
         qpos = np.zeros(7)
         qpos[:3] = drone_pos
-        # Crazyflow uses xyzw internally but MuJoCo qpos wants wxyz
         qpos[3] = drone_quat[3]   # w
         qpos[4:7] = drone_quat[:3]  # xyz
-        self.sim.mj_data.qpos[:] = qpos
-        self.sim.mj_data.mocap_pos[:] = np.asarray(
-            self.sim.mjx_data.mocap_pos[world, :]
-        )
-        self.sim.mj_data.mocap_quat[:] = np.asarray(
-            self.sim.mjx_data.mocap_quat[world, :]
-        )
+        self._render_data.qpos[:7] = qpos
 
-        # Forward dynamics to update rendering state
-        mujoco.mj_forward(self.sim.mj_model, self.sim.mj_data)
+        # Set rover (burger) pose in render data from rover state [x, y, c, s, v]
+        rover = rover_for_render if rover_for_render is not None else np.asarray(self.rover_state[world])
+        rx, ry, cth, sth = float(rover[0]), float(rover[1]), float(rover[2]), float(rover[3])
+        half_th = np.arctan2(sth, cth) / 2.0
+        addr = self._rover_qpos_addr
+        self._render_data.qpos[addr:addr + 7] = [
+            rx, ry, 0.0, np.cos(half_th), 0.0, 0.0, np.sin(half_th)
+        ]
+
+        # Forward kinematics to update body positions for rendering
+        mujoco.mj_forward(self._render_model, self._render_data)
 
         # Ensure inner viewer is created and patch for mujoco 3.5+ compat
         self.sim.viewer._get_viewer(self.render_mode)
@@ -1320,50 +1368,6 @@ class LandingEnv(gym.Env):
         # Clear previous frame's markers so they don't accumulate
         viewer._markers.clear()
 
-        # Draw rover markers (use pre-reset state if available)
-        rover = rover_for_render if rover_for_render is not None else np.asarray(self.rover_state[world])  # (5,) [x, y, c, s, v]
-        rx, ry = float(rover[0]), float(rover[1])
-        cth, sth = float(rover[2]), float(rover[3])
-        pad_r = self.cfg.rover_platform_radius
-        rh = self.cfg.rover_height
-        rover_mat = np.array([
-            cth, -sth, 0,
-            sth,  cth, 0,
-              0,    0, 1,
-        ], dtype=np.float64)
-
-        # Rover body
-        body_half_z = rh / 2.0
-        viewer.add_marker(
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=np.array([pad_r * 1.2, pad_r * 0.8, body_half_z]),
-            pos=np.array([rx, ry, body_half_z]),
-            mat=rover_mat,
-            rgba=np.array([0.3, 0.3, 0.3, 1.0]),
-            label="",
-        )
-
-        # Landing pad on top
-        pad_thickness = 0.005
-        viewer.add_marker(
-            type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-            size=np.array([pad_r, pad_r, pad_thickness]),
-            pos=np.array([rx, ry, rh + pad_thickness]),
-            mat=np.eye(3).flatten(),
-            rgba=np.array([0.1, 0.8, 0.1, 0.9]),
-            label="",
-        )
-
-        # Heading indicator
-        viewer.add_marker(
-            type=mujoco.mjtGeom.mjGEOM_CAPSULE,
-            size=np.array([0.008, 0.008, pad_r * 0.3]),
-            pos=np.array([rx + cth * pad_r, ry + sth * pad_r, rh + pad_thickness + 0.01]),
-            mat=rover_mat,
-            rgba=np.array([1.0, 0.2, 0.2, 1.0]),
-            label="",
-        )
-
         # Draw trajectory lines (thin capsules between consecutive points)
         if self._trajectory_enabled and len(self._drone_trajectory) > 1:
             drone_rgba = np.array([0.9, 0.0, 0.0, 1.0])   # red (like MuJoCo X-axis)
@@ -1397,8 +1401,8 @@ class LandingEnv(gym.Env):
         import mujoco
 
         viewer = self.sim.viewer.viewer
-        model = self.sim.mj_model
-        data = self.sim.mj_data
+        model = self._render_model
+        data = self._render_data
 
         # Overlay size: 1/4 of main frame
         oh = main_frame.shape[0] // 4

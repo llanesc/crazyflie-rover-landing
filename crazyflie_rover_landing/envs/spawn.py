@@ -2,7 +2,7 @@
 
 All spawn functions return:
   - drone_pos: (N, 3)        initial drone positions [x, y, z]
-  - rover_state: (N, 5)      initial rover state [x, y, cos(θ), sin(θ), v]
+  - rover_state: (N, 6)      initial rover state [x, y, cos(θ), sin(θ), v_L, v_R]
 
 The signature for a SpawnFn is: (key, N) -> (drone_pos, rover_state).
 """
@@ -16,7 +16,7 @@ import jax.numpy as jnp
 
 # Type alias for spawn functions used by LandingEnv
 SpawnFn = Callable[[jax.Array, int], tuple[jnp.ndarray, jnp.ndarray]]
-"""(key, N) -> (drone_pos (N,3), rover_state (N,5))"""
+"""(key, N) -> (drone_pos (N,3), rover_state (N,6))"""
 
 
 # =============================================================================
@@ -53,20 +53,21 @@ def _rover_uniform_impl(
 ) -> jnp.ndarray:
     """Sample rover initial state uniformly within the arena.
 
-    State: [x, y, cos(θ), sin(θ), v]
+    State: [x, y, cos(θ), sin(θ), v_L, v_R]
       - Position uniformly in ±x_half × ±y_half.
       - Heading uniformly in [0, 2π).
       - Speed uniformly in [min_speed, max_speed].
 
     Returns:
-        rover_state: (N, 5) array.
+        rover_state: (N, 6) array.
     """
     key, xk, yk, tk, vk = jax.random.split(key, 5)
     x = jax.random.uniform(xk, (N,), minval=-x_half, maxval=x_half)
     y = jax.random.uniform(yk, (N,), minval=-y_half, maxval=y_half)
     theta = jax.random.uniform(tk, (N,), minval=0.0, maxval=2.0 * jnp.pi)
     v = jax.random.uniform(vk, (N,), minval=min_speed, maxval=max_speed)
-    return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), v], axis=-1)
+    # Both wheels start at the same linear velocity (straight-line motion)
+    return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), v, v], axis=-1)
 
 
 def _rover_stationary_impl(
@@ -78,14 +79,14 @@ def _rover_stationary_impl(
     """Spawn rover at a random XY position with zero velocity.
 
     Returns:
-        rover_state: (N, 5) with v=0.
+        rover_state: (N, 6) with v_L=v_R=0.
     """
     key, xk, yk, tk = jax.random.split(key, 4)
     x = jax.random.uniform(xk, (N,), minval=-x_half, maxval=x_half)
     y = jax.random.uniform(yk, (N,), minval=-y_half, maxval=y_half)
     theta = jax.random.uniform(tk, (N,), minval=0.0, maxval=2.0 * jnp.pi)
-    v = jnp.zeros((N,))
-    return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), v], axis=-1)
+    zeros = jnp.zeros((N,))
+    return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), zeros, zeros], axis=-1)
 
 
 # =============================================================================

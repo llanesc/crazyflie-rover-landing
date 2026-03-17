@@ -66,8 +66,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
             kwargs[key] = env_cfg[key]
 
     # Rover params
-    for key in ("rover_max_speed", "rover_min_speed", "rover_max_omega", "rover_max_accel",
-                "rover_platform_radius", "rover_height"):
+    for key in ("rover_wheel_vel_max", "rover_platform_radius", "rover_height"):
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
 

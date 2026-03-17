@@ -308,10 +308,6 @@ def main():
         mpc_horizon=r_cfg["mpc_horizon"],
         mpc_dt=r_cfg["mpc_dt"],
         cost_net_sizes=r_cfg["cost_net_sizes"],
-        max_speed=env_cfg.rover_max_speed,
-        min_speed=env_cfg.rover_min_speed,
-        max_omega=env_cfg.rover_max_omega,
-        max_accel=env_cfg.rover_max_accel,
         n_batch_max=n_batch_max,
         initial_log_std=r_cfg["initial_log_std"],
         activation=r_cfg["activation"],
@@ -380,7 +376,7 @@ def main():
     )
 
     agent = MAPPO_MPC(
-        mpc_state_sizes={"drone": 12, "rover": 5},
+        mpc_state_sizes={"drone": 12, "rover": 6},
         possible_agents=possible_agents,
         models=models,
         memories=memories,

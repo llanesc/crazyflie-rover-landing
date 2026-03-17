@@ -10,8 +10,8 @@ from drone_models.core import load_params
 class LandingEnvConfig:
     """Configuration for the Crazyflie-rover cooperative landing environment.
 
-    Two heterogeneous cooperative agents: a Crazyflie drone and a unicycle
-    ground rover. Both agents collaborate to land the drone on the rover with
+    Two heterogeneous cooperative agents: a Crazyflie drone and a TurtleBot3 Burger
+    differential-drive rover. Both agents collaborate to land the drone on the rover with
     minimal touchdown velocity.
 
     Attributes:
@@ -32,10 +32,7 @@ class LandingEnvConfig:
         disturbance_force_std: Std of force disturbance [N].
         disturbance_torque_std: Std of torque disturbance [Nm].
 
-        rover_max_speed: Max rover forward speed [m/s].
-        rover_min_speed: Max rover reverse speed [m/s].
-        rover_max_omega: Max rover yaw rate [rad/s].
-        rover_max_accel: Max rover acceleration [m/s^2].
+        rover_wheel_vel_max: Max wheel angular velocity command [rad/s] (matches MuJoCo ctrlrange).
         rover_platform_radius: Landing pad radius on rover [m].
         rover_height: Height of the landing pad surface above ground [m].
 
@@ -91,12 +88,9 @@ class LandingEnvConfig:
     disturbance_torque_std: float = 1e-4
 
     # Rover physical limits
-    rover_max_speed: float = 1.5
-    rover_min_speed: float = -1.5
-    rover_max_omega: float = 1.5708   # ~π/2 rad/s
-    rover_max_accel: float = 2.0
-    rover_platform_radius: float = 0.15  # Landing pad radius [m]
-    rover_height: float = 0.1             # Height of landing pad surface above ground [m]
+    rover_wheel_vel_max: float = 6.67   # rad/s  (MuJoCo ctrlrange)
+    rover_platform_radius: float = 0.10  # Landing pad radius [m]
+    rover_height: float = 0.152          # Height of landing pad surface above ground [m]
 
     # Arena / boundary
     map_size_x: float = 5.0   # Total size; drone stays within ±2.5 m
@@ -189,3 +183,9 @@ class LandingEnvConfig:
     def map_half_y(self) -> float:
         """Half-width of the arena in Y [m]."""
         return self.map_size_y / 2.0
+
+    @property
+    def rover_max_speed(self) -> float:
+        """Max body linear speed [m/s] = r × rover_wheel_vel_max."""
+        from crazyflie_rover_landing.envs.rover_dynamics import WHEEL_RADIUS
+        return WHEEL_RADIUS * self.rover_wheel_vel_max

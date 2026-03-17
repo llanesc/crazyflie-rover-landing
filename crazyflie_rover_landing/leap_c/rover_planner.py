@@ -1,7 +1,7 @@
-"""Differentiable MPC planner for the unicycle ground rover (LINEAR_LS).
+"""Differentiable MPC planner for the TurtleBot3 Burger differential-drive rover (LINEAR_LS).
 
-State (5D):   [x, y, cos(θ), sin(θ), v]
-Control (2D): [a, ω]
+State (6D):   [x, y, cos(θ), sin(θ), v_L, v_R]
+Control (2D): [ω_L_cmd, ω_R_cmd]  — wheel angular velocity commands [rad/s]
 """
 
 from copy import deepcopy
@@ -26,19 +26,17 @@ from crazyflie_rover_landing.leap_c.rover_ocp_linear_ls import (
     create_rover_params_linear_ls,
     export_rover_ocp_linear_ls,
     get_rover_learnable_param_dim,
-    _MAX_SPEED,
-    _MIN_SPEED,
-    _MAX_OMEGA,
-    _MAX_ACCEL,
+    _WHEEL_VEL_MAX,
+    _WHEEL_LIN_VEL_MAX,
 )
 
 
 class RoverStationaryInitializer(AcadosDiffMpcInitializer):
-    """Warm-start: state = x0 repeated, control = zero (stationary)."""
+    """Warm-start: state = x0 repeated, control = zero (wheels at rest)."""
 
     def __init__(self, ocp: AcadosOcp):
         self.default_iterate = ocp.create_default_initial_iterate().flatten()
-        self.N = ocp.solver_options.N_horizon
+        self.N  = ocp.solver_options.N_horizon
         self.nx = ocp.dims.nx
         self.nu = ocp.dims.nu
         self._zero_u_tiled = np.zeros(self.N * self.nu)
@@ -55,7 +53,7 @@ class RoverStationaryInitializer(AcadosDiffMpcInitializer):
         B = solver_input.batch_size
         x_batch = np.tile(solver_input.x0, (1, self.N + 1))
         u_batch = np.tile(self._zero_u_tiled, (B, 1))
-        z_size = self.default_iterate.z.size
+        z_size  = self.default_iterate.z.size
         sl_size = self.default_iterate.sl.size
         su_size = self.default_iterate.su.size
         pi_size = self.default_iterate.pi.size
@@ -63,10 +61,10 @@ class RoverStationaryInitializer(AcadosDiffMpcInitializer):
         return AcadosOcpFlattenedBatchIterate(
             x=x_batch,
             u=u_batch,
-            z=np.zeros((B, z_size)) if z_size > 0 else np.zeros((B, 0)),
-            sl=np.zeros((B, sl_size)) if sl_size > 0 else np.zeros((B, 0)),
-            su=np.zeros((B, su_size)) if su_size > 0 else np.zeros((B, 0)),
-            pi=np.zeros((B, pi_size)) if pi_size > 0 else np.zeros((B, 0)),
+            z=np.zeros((B, z_size))   if z_size   > 0 else np.zeros((B, 0)),
+            sl=np.zeros((B, sl_size)) if sl_size   > 0 else np.zeros((B, 0)),
+            su=np.zeros((B, su_size)) if su_size   > 0 else np.zeros((B, 0)),
+            pi=np.zeros((B, pi_size)) if pi_size   > 0 else np.zeros((B, 0)),
             lam=np.zeros((B, lam_size)) if lam_size > 0 else np.zeros((B, 0)),
             N_batch=B,
         )
@@ -74,19 +72,17 @@ class RoverStationaryInitializer(AcadosDiffMpcInitializer):
 
 @dataclass(kw_only=True)
 class RoverPlannerConfig:
-    """Configuration for the rover MPC planner."""
+    """Configuration for the differential-drive rover MPC planner."""
 
-    N_horizon: int = 4
-    dt: float = 0.1           # 10 Hz rover MPC
+    N_horizon: int       = 4
+    dt: float            = 0.1          # 10 Hz rover MPC
     T_horizon: float | None = None
-    n_batch_max: int = 4096
-    num_threads: int = 8
+    n_batch_max: int     = 4096
+    num_threads: int     = 8
     pos_offset_max: float = 2.0
-    max_speed: float = _MAX_SPEED
-    min_speed: float = _MIN_SPEED
-    max_omega: float = _MAX_OMEGA
-    max_accel: float = _MAX_ACCEL
-    dtype: torch.dtype = torch.float32
+    wheel_vel_max: float  = _WHEEL_VEL_MAX
+    wheel_lin_vel_max: float = _WHEEL_LIN_VEL_MAX
+    dtype: torch.dtype   = torch.float32
 
     def __post_init__(self) -> None:
         if self.T_horizon is None:
@@ -94,11 +90,11 @@ class RoverPlannerConfig:
 
 
 class RoverPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
-    """Differentiable MPC planner for the unicycle ground rover.
+    """Differentiable MPC planner for the TurtleBot3 Burger rover.
 
-    Uses unicycle kinematics and LINEAR_LS cost structure.
-    State (5D): [x, y, cos(θ), sin(θ), v]
-    Control (2D): [a, ω]
+    Uses differential-drive dynamics and LINEAR_LS cost structure.
+    State (6D): [x, y, cos(θ), sin(θ), v_L, v_R]
+    Control (2D): [ω_L_cmd, ω_R_cmd]
     """
 
     def __init__(
@@ -113,10 +109,8 @@ class RoverPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             params = create_rover_params_linear_ls(
                 N_horizon=self.cfg.N_horizon,
                 pos_offset_max=self.cfg.pos_offset_max,
-                max_speed=self.cfg.max_speed,
-                min_speed=self.cfg.min_speed,
-                max_omega=self.cfg.max_omega,
-                max_accel=self.cfg.max_accel,
+                wheel_vel_max=self.cfg.wheel_vel_max,
+                wheel_lin_vel_max=self.cfg.wheel_lin_vel_max,
             )
 
         param_manager = AcadosParameterManager(
@@ -126,14 +120,12 @@ class RoverPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
 
         ocp = export_rover_ocp_linear_ls(
             param_manager=param_manager,
-            name="rover_unicycle_linear_ls",
+            name="rover_diff_drive_linear_ls",
             N_horizon=self.cfg.N_horizon,
             T_horizon=self.cfg.T_horizon,
             dt=self.cfg.dt,
-            max_speed=self.cfg.max_speed,
-            min_speed=self.cfg.min_speed,
-            max_omega=self.cfg.max_omega,
-            max_accel=self.cfg.max_accel,
+            wheel_vel_max=self.cfg.wheel_vel_max,
+            wheel_lin_vel_max=self.cfg.wheel_lin_vel_max,
         )
 
         initializer = RoverStationaryInitializer(ocp)
@@ -159,10 +151,10 @@ class RoverPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         """Solve rover MPC.
 
         Args:
-            obs: Rover MPC state [x, y, c, s, v], shape (B, 5).
+            obs:    Rover MPC state [x, y, c, s, v_L, v_R], shape (B, 6).
             action: Unused.
-            param: Learnable parameters, shape (B, n_learnable).
-            ctx: Optional warm-start context.
+            param:  Learnable parameters, shape (B, n_learnable).
+            ctx:    Optional warm-start context.
 
         Returns:
             (ctx, u0, x_traj, u_traj, value)
