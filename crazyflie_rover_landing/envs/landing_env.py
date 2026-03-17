@@ -1182,10 +1182,10 @@ class LandingEnv(gym.Env):
             self.sim.mj_model.vis.global_.offwidth = w
             self.sim.mj_model.vis.global_.offheight = h
             cam_config = {
-                "distance": 5.0,
+                "distance": 12.0,
                 "azimuth": 90.0,
-                "elevation": -30.0,
-                "lookat": [0.0, 0.0, 0.5],
+                "elevation": -45.0,
+                "lookat": [0.0, 0.0, 0.3],
             }
             # Apply user camera overrides
             overrides = getattr(self, '_cam_overrides', {})
@@ -1317,6 +1317,9 @@ class LandingEnv(gym.Env):
                     )
                 viewer._create_overlay = _create_overlay_with_camera
 
+        # Clear previous frame's markers so they don't accumulate
+        viewer._markers.clear()
+
         # Draw rover markers (use pre-reset state if available)
         rover = rover_for_render if rover_for_render is not None else np.asarray(self.rover_state[world])  # (5,) [x, y, c, s, v]
         rx, ry = float(rover[0]), float(rover[1])
@@ -1378,8 +1381,92 @@ class LandingEnv(gym.Env):
                 p1 = np.array([rover_pts_2d[i][0], rover_pts_2d[i][1], 0.01])
                 self._draw_line_segment(viewer, mujoco, p0, p1, line_width, rover_rgba)
 
-        # Render (viewer.render() calls mjv_updateScene, then our markers, then mjr_render)
-        return self.sim.viewer.render(self.render_mode)
+        # Render main view
+        main_frame = self.sim.viewer.render(self.render_mode)
+
+        # Overlay: drone body-frame camera pointing -Z (downward)
+        if self.render_mode == "rgb_array" and main_frame is not None:
+            main_frame = self._composite_drone_cam(main_frame, drone_pos, drone_quat)
+
+        return main_frame
+
+    def _composite_drone_cam(
+        self, main_frame: np.ndarray, drone_pos: np.ndarray, drone_quat_xyzw: np.ndarray
+    ) -> np.ndarray:
+        """Render a small drone body-frame downward camera and composite onto main frame."""
+        import mujoco
+
+        viewer = self.sim.viewer.viewer
+        model = self.sim.mj_model
+        data = self.sim.mj_data
+
+        # Overlay size: 1/4 of main frame
+        oh = main_frame.shape[0] // 4
+        ow = main_frame.shape[1] // 4
+
+        # Save original camera state
+        orig_type = viewer.cam.type
+        orig_fixedcamid = viewer.cam.fixedcamid
+        orig_distance = viewer.cam.distance
+        orig_azimuth = viewer.cam.azimuth
+        orig_elevation = viewer.cam.elevation
+        orig_lookat = viewer.cam.lookat.copy()
+
+        # Camera just below drone, looking straight down at the ground
+        # Lookat = ground point directly below the drone
+        lookat = np.array([drone_pos[0], drone_pos[1], 0.0])
+        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        viewer.cam.fixedcamid = -1
+        viewer.cam.lookat[:] = lookat
+        viewer.cam.distance = drone_pos[2] + 0.5  # 0.5m above drone, looking down
+        viewer.cam.azimuth = 90.0
+        viewer.cam.elevation = -90.0  # straight down
+
+        # Render to small viewport
+        old_viewport = mujoco.MjrRect(viewer.viewport.left, viewer.viewport.bottom,
+                                       viewer.viewport.width, viewer.viewport.height)
+        viewer.viewport.width = ow
+        viewer.viewport.height = oh
+
+        mujoco.mjv_updateScene(
+            model, data, viewer.vopt, viewer.pert, viewer.cam,
+            mujoco.mjtCatBit.mjCAT_ALL, viewer.scn,
+        )
+        # Re-add markers for the overlay render
+        for marker_params in viewer._markers:
+            viewer._add_marker_to_scene(marker_params)
+        mujoco.mjr_render(viewer.viewport, viewer.scn, viewer.con)
+
+        rgb_arr = np.zeros(3 * ow * oh, dtype=np.uint8)
+        depth_arr = np.zeros(ow * oh, dtype=np.float32)
+        mujoco.mjr_readPixels(rgb_arr, depth_arr, viewer.viewport, viewer.con)
+        overlay_frame = rgb_arr.reshape((oh, ow, 3))[::-1, :]
+
+        # Restore camera and viewport
+        viewer.cam.type = orig_type
+        viewer.cam.fixedcamid = orig_fixedcamid
+        viewer.cam.distance = orig_distance
+        viewer.cam.azimuth = orig_azimuth
+        viewer.cam.elevation = orig_elevation
+        viewer.cam.lookat[:] = orig_lookat
+        viewer.viewport.left = old_viewport.left
+        viewer.viewport.bottom = old_viewport.bottom
+        viewer.viewport.width = old_viewport.width
+        viewer.viewport.height = old_viewport.height
+
+        # Composite: bottom-left with 1px border
+        margin = 10
+        border = 2
+        result = main_frame.copy()
+        y_start = main_frame.shape[0] - oh - margin
+        x_start = margin
+        # Draw dark border
+        result[y_start - border:y_start + oh + border,
+               x_start - border:x_start + ow + border] = 40
+        # Paste overlay
+        result[y_start:y_start + oh, x_start:x_start + ow] = overlay_frame
+
+        return result
 
     def close(self):
         self.sim.close()

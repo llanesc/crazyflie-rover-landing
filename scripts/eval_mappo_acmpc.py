@@ -237,17 +237,25 @@ def main():
 
     # Set up video writer
     video_writer = None
+    video_target_fps = 30
+    video_frame_interval = max(1, round(env_cfg.control_freq / video_target_fps))
+    # Actual FPS = control_freq / frame_interval, so playback matches real time
+    video_fps = env_cfg.control_freq / video_frame_interval
     if recording_video:
         import imageio
         if args.video == "auto":
-            video_path = checkpoint_path.parent / "eval_video.mp4"
+            # Save in run dir, not inside checkpoints/
+            run_dir = checkpoint_path.parent
+            if run_dir.name == "checkpoints":
+                run_dir = run_dir.parent
+            video_path = run_dir / "eval_video.mp4"
         else:
             video_path = Path(args.video)
         video_writer = imageio.get_writer(
-            str(video_path), fps=env_cfg.control_freq, codec="libx264",
+            str(video_path), fps=video_fps, codec="libx264",
             quality=8,
         )
-        print(f"Recording video to: {video_path} (FPS={env_cfg.control_freq})")
+        print(f"Recording video to: {video_path} (FPS={video_fps:.1f}, every {video_frame_interval} steps, real-time)")
 
     print(f"Environment: {n_worlds} parallel worlds, {env_cfg.episode_length_s}s episodes")
 
@@ -465,18 +473,18 @@ def main():
                       f"({screenshot_frame.shape[1]}x{screenshot_frame.shape[0]})")
                 screenshot_saved = True
 
-        # Regular rendering (for live view or video)
-        if args.render:
+        # Regular rendering (for live view and/or video)
+        should_record_frame = recording_video and (step % video_frame_interval == 0)
+        if args.render or should_record_frame:
             t_start = time.monotonic()
-            raw_env.render()
-            elapsed = time.monotonic() - t_start
-            sleep_time = env_cfg.dt - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-        elif recording_video:
             frame = raw_env.render()
-            if frame is not None:
+            if should_record_frame and frame is not None:
                 video_writer.append_data(frame)
+            if args.render:
+                elapsed = time.monotonic() - t_start
+                sleep_time = env_cfg.dt - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
         step += 1
 
@@ -509,7 +517,11 @@ def main():
         "timeouts": timeouts,
     }
 
-    results_path = checkpoint_path.parent / "eval_results.json"
+    # Save in run dir, not inside checkpoints/
+    results_dir = checkpoint_path.parent
+    if results_dir.name == "checkpoints":
+        results_dir = results_dir.parent
+    results_path = results_dir / "eval_results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Results saved to: {results_path}")
