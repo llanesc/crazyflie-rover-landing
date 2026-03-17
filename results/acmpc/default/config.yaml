@@ -49,13 +49,13 @@ rewards:
   rover_boundary_coef: 1.0    # per-step penalty for rover at arena boundary
 
 policy:
-  value_net_sizes: [256, 256]
+  value_net_sizes: [128, 128]
   cost_net_activation: "relu"
   value_activation: "relu"
   drone:
     mpc_horizon: 2
     mpc_dt: 0.02
-    cost_net_sizes: [256, 256]
+    cost_net_sizes: [128, 128]
     roll_pitch_max: 0.2
     yaw_max: 0.1
     pos_offset_max: 0.25
@@ -63,7 +63,7 @@ policy:
   rover:
     mpc_horizon: 2
     mpc_dt: 0.02
-    cost_net_sizes: [256, 256]
+    cost_net_sizes: [128, 128]
     pos_offset_max: 0.25
     initial_log_std: [-0.8, -0.8]
 
@@ -122,7 +122,7 @@ curriculum:
         y_half: 1.5
       rover_spawn:
         stationary: false
-        max_speed: 0.5
+        max_speed: 0.07   # m/s linear wheel vel  (~30% of 0.220 m/s max)
 
     - name: "medium_rover"
       drone_spawn:
@@ -132,7 +132,7 @@ curriculum:
         y_half: 2.5
       rover_spawn:
         stationary: false
-        max_speed: 1.0
+        max_speed: 0.14   # m/s  (~60% of max)
 
     - name: "fast_rover"
       drone_spawn:
@@ -142,7 +142,7 @@ curriculum:
         y_half: 3.5
       rover_spawn:
         stationary: false
-        max_speed: 1.5
+        max_speed: 0.20   # m/s  (~90% of max)
       randomize_mass: true
       randomize_inertia: true
       mass_randomization_std: 0.002       # [kg]
@@ -156,7 +156,7 @@ curriculum:
         y_half: 5.5
       rover_spawn:
         stationary: false
-        max_speed: 1.5
+        max_speed: 0.20   # m/s
       randomize_mass: true
       randomize_inertia: true
       mass_randomization_std: 0.002       # [kg]
@@ -171,7 +171,7 @@ curriculum:
         y_half: 7.5
       rover_spawn:
         stationary: false
-        max_speed: 1.5
+        max_speed: 0.22   # m/s  (physical max: r * wheel_vel_max = 0.033 * 6.67)
       landing_vel_xy_tol: 0.05     # m/s — constrained landing velocity tolerance for fast rover
       landing_vel_z_tol: 0.2      # m/s — max descent speed (upward rejected)
       randomize_mass: true
