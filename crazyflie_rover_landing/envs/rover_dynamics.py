@@ -12,11 +12,16 @@ Physical parameters (TurtleBot3 Burger MuJoCo XML):
   r     = 0.033  m     wheel radius
   L     = 0.160  m     wheelbase  (2 × 0.080 m half-wheelbase in XML)
   I_eff = 0.01   kg·m² armature + wheel inertia  (armature=0.01 >> I_wheel≈1.5e-5)
-  kv    = 0.1    N·m·s/rad  velocity actuator gain
-  b     = 0.1    N·m   viscous friction (approximates frictionloss for differentiability)
+  kv    = 0.1    N·m·s/rad  velocity actuator gain  (XML: kv="0.1")
+  fc    = 0.1    N·m        Coulomb friction loss   (XML: frictionloss="0.1")
 
-First-order wheel dynamics (each wheel i):
-  v̇_i = (kv·r·ω_cmd_i − (kv + b)·v_i) / I_eff
+MuJoCo equation of motion per wheel (angular):
+  I_eff · ω̇ = kv · (ω_cmd − ω) − fc · sign(ω)
+
+In linear wheel velocity v = r·ω:
+  v̇_i = (kv·r / I_eff) · ω_cmd_i − (kv / I_eff) · v_i − (fc·r / I_eff) · sign(v_i)
+
+Coulomb sign() smoothed via tanh(v/ε) for differentiability in JAX and the OCP.
 
 Kinematics:
   ẋ = (v_L + v_R)/2 · c    ẏ = (v_L + v_R)/2 · s
@@ -32,12 +37,14 @@ import jax.numpy as jnp
 WHEEL_RADIUS: float = 0.033        # m
 WHEELBASE: float    = 0.160        # m  (2 × 0.080 m from XML)
 _I_EFF: float       = 0.01         # kg·m²  armature=0.01, I_wheel≈1.5e-5 (negligible)
-_KV: float          = 0.1          # N·m·s/rad  (kv in XML)
-_B: float           = 0.1          # N·m        (frictionloss, treated as viscous)
+_KV: float          = 0.1          # N·m·s/rad  velocity gain  (XML: kv="0.1")
+_FC: float          = 0.1          # N·m        Coulomb friction  (XML: frictionloss="0.1")
 
 # Precomputed coefficients
-_DRIVE_COEF: float = _KV * WHEEL_RADIUS / _I_EFF   # m·s⁻¹ per rad/s command  ≈ 0.33
-_DECAY_COEF: float = (_KV + _B) / _I_EFF            # s⁻¹  ≈ 20.0
+_DRIVE_COEF: float   = _KV * WHEEL_RADIUS / _I_EFF         # ≈ 0.33  m/s per rad/s cmd
+_DECAY_COEF: float   = _KV / _I_EFF                         # = 10.0  s⁻¹  (viscous from kv only)
+_COULOMB_COEF: float = _FC * WHEEL_RADIUS / _I_EFF          # ≈ 0.33  m/s²  Coulomb magnitude
+_COULOMB_EPS: float  = 0.005                                 # m/s    tanh smoothing width
 
 # MuJoCo actuator limits  (ctrlrange="-6.67 6.67" rad/s)
 WHEEL_VEL_MAX: float     = 6.67
@@ -47,8 +54,17 @@ NX_ROVER = 6  # [x, y, c, s, v_L, v_R]
 NU_ROVER = 2  # [ω_L_cmd, ω_R_cmd]
 
 
+def _coulomb(v: jnp.ndarray) -> jnp.ndarray:
+    """Smooth Coulomb friction: tanh approximation of sign(v)."""
+    return jnp.tanh(v / _COULOMB_EPS)
+
+
 def _ode(x: jnp.ndarray, u: jnp.ndarray) -> jnp.ndarray:
-    """Continuous-time differential-drive ODE."""
+    """Continuous-time differential-drive ODE matching MuJoCo burger XML.
+
+    Each wheel: I_eff·ω̇ = kv·(ω_cmd−ω) − fc·sign(ω)
+    In linear velocity:  v̇ = DRIVE·ω_cmd − DECAY·v − COULOMB·tanh(v/ε)
+    """
     c, s, v_L, v_R = x[2], x[3], x[4], x[5]
     v_body  = (v_L + v_R) * 0.5
     omega_b = (v_R - v_L) / WHEELBASE
@@ -57,8 +73,8 @@ def _ode(x: jnp.ndarray, u: jnp.ndarray) -> jnp.ndarray:
         v_body * s,
         -omega_b * s,
          omega_b * c,
-        _DRIVE_COEF * u[0] - _DECAY_COEF * v_L,
-        _DRIVE_COEF * u[1] - _DECAY_COEF * v_R,
+        _DRIVE_COEF * u[0] - _DECAY_COEF * v_L - _COULOMB_COEF * _coulomb(v_L),
+        _DRIVE_COEF * u[1] - _DECAY_COEF * v_R - _COULOMB_COEF * _coulomb(v_R),
     ])
 
 

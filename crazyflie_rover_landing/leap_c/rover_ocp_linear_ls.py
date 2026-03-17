@@ -8,11 +8,11 @@ State:   [x, y, c, s, v_L, v_R]  (NX_ROVER = 6)
 
 Control: [ω_L_cmd, ω_R_cmd]  (NU_ROVER = 2)  — wheel angular velocity commands [rad/s]
 
-Dynamics (continuous-time, RK4 integrated):
+Dynamics (continuous-time, RK4 integrated) — matches MuJoCo burger XML:
   v_body = (v_L+v_R)/2,  ω_body = (v_R−v_L)/L
   ẋ = v_body·c,  ẏ = v_body·s,  ċ = −ω_body·s,  ṡ = ω_body·c
-  v̇_L = _DRIVE·ω_L_cmd − _DECAY·v_L
-  v̇_R = _DRIVE·ω_R_cmd − _DECAY·v_R
+  v̇_i = DRIVE·ω_i_cmd − DECAY·v_i − COULOMB·tanh(v_i/ε)
+  where DRIVE=kv·r/I_eff, DECAY=kv/I_eff, COULOMB=fc·r/I_eff
 
 Cost: J = 0.5·(y − y_ref)'·W·(y − y_ref),  y = [x; u]
 """
@@ -30,13 +30,16 @@ NU_ROVER = 2   # [ω_L_cmd, ω_R_cmd]
 NY_ROVER = NX_ROVER + NU_ROVER  # 8
 
 # Physical constants (TurtleBot3 Burger)
-_R: float    = 0.033        # wheel radius [m]
-_L: float    = 0.160        # wheelbase [m]
-_I_EFF: float = 0.01        # effective wheel inertia [kg·m²]
-_KV: float   = 0.1          # velocity gain [N·m·s/rad]
-_B: float    = 0.1          # viscous friction [N·m]
-_DRIVE: float = _KV * _R / _I_EFF   # ≈ 0.33
-_DECAY: float = (_KV + _B) / _I_EFF  # 20.0
+_R: float     = 0.033   # wheel radius [m]
+_L: float     = 0.160   # wheelbase [m]
+_I_EFF: float = 0.01    # effective wheel inertia [kg·m²]
+_KV: float    = 0.1     # velocity gain [N·m·s/rad]    (XML: kv="0.1")
+_FC: float    = 0.1     # Coulomb friction [N·m]        (XML: frictionloss="0.1")
+
+_DRIVE: float        = _KV * _R / _I_EFF       # ≈ 0.33  m/s per rad/s cmd
+_DECAY: float        = _KV / _I_EFF             # = 10.0  s⁻¹
+_COULOMB: float      = _FC * _R / _I_EFF        # ≈ 0.33  m/s²
+_COULOMB_EPS: float  = 0.005                     # m/s  tanh smoothing width
 
 # Actuator limits
 _WHEEL_VEL_MAX: float     = 6.67                  # rad/s  (ctrlrange in XML)
@@ -47,8 +50,17 @@ _WHEEL_LIN_VEL_MAX: float = _R * _WHEEL_VEL_MAX   # ≈ 0.220 m/s
 # CasADi differential-drive dynamics
 # ---------------------------------------------------------------------------
 
+def _smooth_coulomb(v: ca.SX) -> ca.SX:
+    """Smooth Coulomb friction: tanh approximation of sign(v)."""
+    return ca.tanh(v / _COULOMB_EPS)
+
+
 def _diff_drive_ode(x: ca.SX, u: ca.SX) -> ca.SX:
-    """Continuous-time differential-drive ODE."""
+    """Continuous-time differential-drive ODE matching MuJoCo burger XML.
+
+    Each wheel: I_eff·ω̇ = kv·(ω_cmd−ω) − fc·sign(ω)
+    In linear velocity:  v̇ = DRIVE·ω_cmd − DECAY·v − COULOMB·tanh(v/ε)
+    """
     c, s, v_L, v_R = x[2], x[3], x[4], x[5]
     v_body  = (v_L + v_R) / 2
     omega_b = (v_R - v_L) / _L
@@ -57,8 +69,8 @@ def _diff_drive_ode(x: ca.SX, u: ca.SX) -> ca.SX:
         v_body * s,
         -omega_b * s,
          omega_b * c,
-        _DRIVE * u[0] - _DECAY * v_L,
-        _DRIVE * u[1] - _DECAY * v_R,
+        _DRIVE * u[0] - _DECAY * v_L - _COULOMB * _smooth_coulomb(v_L),
+        _DRIVE * u[1] - _DECAY * v_R - _COULOMB * _smooth_coulomb(v_R),
     )
 
 
