@@ -2,7 +2,9 @@
 
 All spawn functions return:
   - drone_pos: (N, 3)        initial drone positions [x, y, z]
-  - rover_state: (N, 6)      initial rover state [x, y, cos(θ), sin(θ), v_L, v_R]
+  - rover_state: (N, nx)     initial rover state
+      burger: (N, 6) [x, y, cos(θ), sin(θ), v_L, v_R]
+      x3:     (N, 7) [x, y, cos(θ), sin(θ), vx, vy, ωz]
 
 The signature for a SpawnFn is: (key, N) -> (drone_pos, rover_state).
 """
@@ -61,13 +63,13 @@ def _rover_uniform_impl(
     Returns:
         rover_state: (N, 6) array.
     """
-    key, xk, yk, tk, vk = jax.random.split(key, 5)
+    key, xk, yk, tk, vLk, vRk = jax.random.split(key, 6)
     x = jax.random.uniform(xk, (N,), minval=-x_half, maxval=x_half)
     y = jax.random.uniform(yk, (N,), minval=-y_half, maxval=y_half)
     theta = jax.random.uniform(tk, (N,), minval=0.0, maxval=2.0 * jnp.pi)
-    v = jax.random.uniform(vk, (N,), minval=min_speed, maxval=max_speed)
-    # Both wheels start at the same linear velocity (straight-line motion)
-    return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), v, v], axis=-1)
+    v_L = jax.random.uniform(vLk, (N,), minval=min_speed, maxval=max_speed)
+    v_R = jax.random.uniform(vRk, (N,), minval=min_speed, maxval=max_speed)
+    return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), v_L, v_R], axis=-1)
 
 
 def _rover_stationary_impl(
@@ -89,11 +91,47 @@ def _rover_stationary_impl(
     return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), zeros, zeros], axis=-1)
 
 
+# ---- X3 mecanum (7-state) variants ----
+
+def _rover_uniform_x3_impl(
+    key: jax.Array,
+    N: int,
+    x_half: float,
+    y_half: float,
+    min_speed: float,
+    max_speed: float,
+) -> jnp.ndarray:
+    """Sample X3 rover state: [x, y, c, s, vx, vy, ωz] all velocities uniform."""
+    key, xk, yk, tk, vxk, vyk, wzk = jax.random.split(key, 7)
+    x = jax.random.uniform(xk, (N,), minval=-x_half, maxval=x_half)
+    y = jax.random.uniform(yk, (N,), minval=-y_half, maxval=y_half)
+    theta = jax.random.uniform(tk, (N,), minval=0.0, maxval=2.0 * jnp.pi)
+    vx = jax.random.uniform(vxk, (N,), minval=min_speed, maxval=max_speed)
+    vy = jax.random.uniform(vyk, (N,), minval=-max_speed, maxval=max_speed)
+    wz = jax.random.uniform(wzk, (N,), minval=-max_speed * 5.0, maxval=max_speed * 5.0)
+    return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), vx, vy, wz], axis=-1)
+
+
+def _rover_stationary_x3_impl(
+    key: jax.Array,
+    N: int,
+    x_half: float,
+    y_half: float,
+) -> jnp.ndarray:
+    """Spawn X3 rover at random position with zero velocity (7-state)."""
+    key, xk, yk, tk = jax.random.split(key, 4)
+    x = jax.random.uniform(xk, (N,), minval=-x_half, maxval=x_half)
+    y = jax.random.uniform(yk, (N,), minval=-y_half, maxval=y_half)
+    theta = jax.random.uniform(tk, (N,), minval=0.0, maxval=2.0 * jnp.pi)
+    zeros = jnp.zeros((N,))
+    return jnp.stack([x, y, jnp.cos(theta), jnp.sin(theta), zeros, zeros, zeros], axis=-1)
+
+
 # =============================================================================
 # JIT-compiled spawn function factory
 # =============================================================================
 
-def create_spawn_fn_from_config(spawn_config: dict) -> SpawnFn:
+def create_spawn_fn_from_config(spawn_config: dict, rover_nx: int = 6) -> SpawnFn:
     """Create a JIT-compiled spawn function from a configuration dict.
 
     Expected keys in spawn_config:
@@ -111,6 +149,7 @@ def create_spawn_fn_from_config(spawn_config: dict) -> SpawnFn:
 
     Args:
         spawn_config: Configuration dict with "drone" and "rover" sub-dicts.
+        rover_nx: Rover state dimension (6 for burger, 7 for x3).
 
     Returns:
         JIT-compiled spawn function (key, N) -> (drone_pos, rover_state).
@@ -131,19 +170,24 @@ def create_spawn_fn_from_config(spawn_config: dict) -> SpawnFn:
     r_max_speed = float(rover_cfg.get("max_speed", 1.5))
     r_min_speed = float(rover_cfg.get("min_speed", -r_max_speed))
 
+    # Select implementations based on rover state dimension
+    is_x3 = rover_nx == 7
+    stat_fn = _rover_stationary_x3_impl if is_x3 else _rover_stationary_impl
+    unif_fn = _rover_uniform_x3_impl if is_x3 else _rover_uniform_impl
+
     if r_stationary:
         @partial(jax.jit, static_argnames=["N"])
         def spawn_fn(key: jax.Array, N: int) -> tuple[jnp.ndarray, jnp.ndarray]:
             key, dk, rk = jax.random.split(key, 3)
             drone_pos = _drone_box_random_impl(dk, N, d_x_half, d_y_half, d_z_min, d_z_max)
-            rover_state = _rover_stationary_impl(rk, N, r_x_half, r_y_half)
+            rover_state = stat_fn(rk, N, r_x_half, r_y_half)
             return drone_pos, rover_state
     else:
         @partial(jax.jit, static_argnames=["N"])
         def spawn_fn(key: jax.Array, N: int) -> tuple[jnp.ndarray, jnp.ndarray]:
             key, dk, rk = jax.random.split(key, 3)
             drone_pos = _drone_box_random_impl(dk, N, d_x_half, d_y_half, d_z_min, d_z_max)
-            rover_state = _rover_uniform_impl(rk, N, r_x_half, r_y_half, r_min_speed, r_max_speed)
+            rover_state = unif_fn(rk, N, r_x_half, r_y_half, r_min_speed, r_max_speed)
             return drone_pos, rover_state
 
     return spawn_fn
@@ -159,6 +203,7 @@ def create_default_spawn_fn(
     rover_min_speed: float = -1.5,
     rover_max_speed: float = 1.5,
     rover_stationary: bool = False,
+    rover_nx: int = 6,
 ) -> SpawnFn:
     """Create a spawn function from explicit keyword arguments."""
     cfg = {
@@ -176,4 +221,4 @@ def create_default_spawn_fn(
             "max_speed": rover_max_speed,
         },
     }
-    return create_spawn_fn_from_config(cfg)
+    return create_spawn_fn_from_config(cfg, rover_nx=rover_nx)

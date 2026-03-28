@@ -61,7 +61,7 @@ class CurriculumManager:
 
     def __init__(self, config: CurriculumConfig):
         self.config = config
-        self.current_level = 0
+        self.current_level = 1
         self.episode_outcomes: deque[bool] = deque(maxlen=config.window_size)
         self.total_episodes = 0
         self.level_episodes: list[int] = [0] * len(config.levels)
@@ -70,7 +70,7 @@ class CurriculumManager:
     @property
     def current_level_config(self) -> CurriculumLevel:
         """Get the current level configuration."""
-        return self.config.levels[self.current_level]
+        return self.config.levels[self.current_level - 1]
 
     @property
     def landing_rate(self) -> float:
@@ -82,7 +82,7 @@ class CurriculumManager:
     @property
     def is_final_level(self) -> bool:
         """Check if currently on the final (hardest) level."""
-        return self.current_level >= len(self.config.levels) - 1
+        return self.current_level >= len(self.config.levels)
 
     @property
     def window_filled(self) -> bool:
@@ -95,9 +95,9 @@ class CurriculumManager:
 
     def set_level(self, level: int, trigger_callbacks: bool = True):
         """Set the curriculum to a specific level."""
-        if level < 0 or level >= len(self.config.levels):
+        if level < 1 or level > len(self.config.levels):
             raise ValueError(
-                f"Level {level} out of range. Valid range: 0-{len(self.config.levels) - 1}"
+                f"Level {level} out of range. Valid range: 1-{len(self.config.levels)}"
             )
         old_level = self.current_level
         self.current_level = level
@@ -127,7 +127,7 @@ class CurriculumManager:
         """
         self.episode_outcomes.append(landed)
         self.total_episodes += 1
-        self.level_episodes[self.current_level] += 1
+        self.level_episodes[self.current_level - 1] += 1
 
         advanced = False
         regressed = False
@@ -141,7 +141,7 @@ class CurriculumManager:
                 self._advance_level()
                 advanced = True
             elif (self.config.allow_regression
-                  and self.current_level > 0
+                  and self.current_level > 1
                   and rate < self.config.regression_threshold):
                 rate_at_change = rate
                 self._regress_level()
@@ -180,7 +180,7 @@ class CurriculumManager:
     def _advance_level(self):
         """Advance to the next difficulty level."""
         old_level = self.current_level
-        self.current_level = min(self.current_level + 1, len(self.config.levels) - 1)
+        self.current_level = min(self.current_level + 1, len(self.config.levels))
         self.episode_outcomes.clear()
         for callback in self._on_level_change_callbacks:
             callback(self.current_level, self.current_level_config)
@@ -190,7 +190,7 @@ class CurriculumManager:
     def _regress_level(self):
         """Regress to an easier difficulty level."""
         old_level = self.current_level
-        self.current_level = max(self.current_level - 1, 0)
+        self.current_level = max(self.current_level - 1, 1)
         self.episode_outcomes.clear()
         for callback in self._on_level_change_callbacks:
             callback(self.current_level, self.current_level_config)
@@ -212,7 +212,7 @@ class CurriculumManager:
             "curriculum/landing_rate": self.landing_rate,
             "curriculum/total_episodes": self.total_episodes,
             "curriculum/window_episodes": len(self.episode_outcomes),
-            "curriculum/level_episodes": self.level_episodes[self.current_level],
+            "curriculum/level_episodes": self.level_episodes[self.current_level - 1],
         }
 
 
@@ -233,7 +233,7 @@ def load_curriculum_config(config: dict) -> Optional[CurriculumConfig]:
     for i, level_dict in enumerate(curriculum_cfg.get("levels", [])):
         name = level_dict.get("name")
         if name is None:
-            level_num = level_dict.get("level", i)
+            level_num = level_dict.get("level", i + 1)
             name = f"Level {level_num}"
 
         # drone_spawn and rover_spawn go into spawn dict; everything else into params

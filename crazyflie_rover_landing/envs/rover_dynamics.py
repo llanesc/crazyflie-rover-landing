@@ -36,15 +36,32 @@ import jax.numpy as jnp
 # ── Physical constants (TurtleBot3 Burger) ──────────────────────────────────
 WHEEL_RADIUS: float = 0.033        # m
 WHEELBASE: float    = 0.160        # m  (2 × 0.080 m from XML)
-_I_EFF: float       = 0.01         # kg·m²  armature=0.01, I_wheel≈1.5e-5 (negligible)
+_I_W: float         = 0.01         # kg·m²  armature=0.01, I_wheel≈1.5e-5 (negligible)
 _KV: float          = 0.1          # N·m·s/rad  velocity gain  (XML: kv="0.1")
 _FC: float          = 0.1          # N·m        Coulomb friction  (XML: frictionloss="0.1")
+_BODY_MASS: float   = 0.957        # kg   total robot mass (base + wheels from XML)
+_BODY_IZ: float     = 0.003387     # kg·m²  yaw inertia about base z-axis (from XML)
+_COULOMB_EPS: float = 0.005        # m/s    tanh smoothing width
 
-# Precomputed coefficients
-_DRIVE_COEF: float   = _KV * WHEEL_RADIUS / _I_EFF         # ≈ 0.33  m/s per rad/s cmd
-_DECAY_COEF: float   = _KV / _I_EFF                         # = 10.0  s⁻¹  (viscous from kv only)
-_COULOMB_COEF: float = _FC * WHEEL_RADIUS / _I_EFF          # ≈ 0.33  m/s²  Coulomb magnitude
-_COULOMB_EPS: float  = 0.005                                 # m/s    tanh smoothing width
+# ── Coupled body-wheel dynamics ─────────────────────────────────────────────
+# Each wheel is coupled through the body via the no-slip constraint.
+# Deriving from Newton's laws with no-slip:
+#   (m + 2·I_w/r²)·v̇_body = (τ_L + τ_R)/r
+#   (I_z + I_w·L²/(2r²))·ω̇_body = (τ_R − τ_L)·L/(2r)
+# Converting back to wheel velocities v̇_L = v̇ − ω̇·L/2, v̇_R = v̇ + ω̇·L/2:
+#   v̇_L = (α+β)·τ_L + (α−β)·τ_R
+#   v̇_R = (α−β)·τ_L + (α+β)·τ_R
+_M_LIN: float = _BODY_MASS + 2 * _I_W / WHEEL_RADIUS**2           # effective translation mass
+_M_ROT: float = _BODY_IZ + _I_W * WHEELBASE**2 / (2 * WHEEL_RADIUS**2)  # effective yaw inertia
+_ALPHA: float = 1.0 / (WHEEL_RADIUS * _M_LIN)                     # translation coupling
+_BETA: float  = WHEELBASE**2 / (4.0 * WHEEL_RADIUS * _M_ROT)      # yaw coupling
+_SELF: float  = _ALPHA + _BETA    # self-coupling  (≈ 3.17, was r/I_w = 3.30)
+_CROSS: float = _ALPHA - _BETA    # cross-coupling (≈ −0.036, was 0)
+
+# Legacy coefficients (for reference / OCP linearization)
+_DRIVE_COEF: float   = _KV * WHEEL_RADIUS / _I_W          # ≈ 0.33
+_DECAY_COEF: float   = _KV / _I_W                          # = 10.0
+_COULOMB_COEF: float = _FC * WHEEL_RADIUS / _I_W           # ≈ 0.33
 
 # MuJoCo actuator limits  (ctrlrange="-6.67 6.67" rad/s)
 WHEEL_VEL_MAX: float     = 6.67
@@ -60,21 +77,31 @@ def _coulomb(v: jnp.ndarray) -> jnp.ndarray:
 
 
 def _ode(x: jnp.ndarray, u: jnp.ndarray) -> jnp.ndarray:
-    """Continuous-time differential-drive ODE matching MuJoCo burger XML.
+    """Continuous-time differential-drive ODE with body-wheel coupling.
 
-    Each wheel: I_eff·ω̇ = kv·(ω_cmd−ω) − fc·sign(ω)
-    In linear velocity:  v̇ = DRIVE·ω_cmd − DECAY·v − COULOMB·tanh(v/ε)
+    Motor torques:  τ_i = kv·(ω_cmd_i − v_i/r) − fc·tanh(v_i/ε)
+    Coupled accel:  v̇_L = _SELF·τ_L + _CROSS·τ_R
+                    v̇_R = _CROSS·τ_L + _SELF·τ_R
+
+    At steady state (v̇=0) the coupling drops out, so v_ss is unchanged.
+    The coupling only affects transient response (~5% slower acceleration
+    due to body mass, ~3% slower yaw due to body I_z).
     """
     c, s, v_L, v_R = x[2], x[3], x[4], x[5]
     v_body  = (v_L + v_R) * 0.5
     omega_b = (v_R - v_L) / WHEELBASE
+
+    # Motor torques (in joint-torque domain, N·m)
+    tau_L = _KV * (u[0] - v_L / WHEEL_RADIUS) - _FC * _coulomb(v_L)
+    tau_R = _KV * (u[1] - v_R / WHEEL_RADIUS) - _FC * _coulomb(v_R)
+
     return jnp.array([
         v_body * c,
         v_body * s,
         -omega_b * s,
          omega_b * c,
-        _DRIVE_COEF * u[0] - _DECAY_COEF * v_L - _COULOMB_COEF * _coulomb(v_L),
-        _DRIVE_COEF * u[1] - _DECAY_COEF * v_R - _COULOMB_COEF * _coulomb(v_R),
+        _SELF * tau_L + _CROSS * tau_R,
+        _CROSS * tau_L + _SELF * tau_R,
     ])
 
 

@@ -44,6 +44,7 @@ from crazyflie_rover_landing.policies import (
     RoverACMPCGaussianPolicy,
     SharedCritic,
 )
+from crazyflie_rover_landing.leap_c.x3_rover_policy_linear_ls import X3RoverACMPCGaussianPolicy
 from crazyflie_rover_landing.preprocessors import PartialRunningStandardScaler
 from crazyflie_rover_landing.utils import (
     load_experiment_config,
@@ -115,7 +116,7 @@ class TerminationLoggingWrapper:
         print(f"[Curriculum] Level change → {level_idx}: {level_config.name}")
         spawn_fn = None
         if level_config.spawn:
-            spawn_fn = create_spawn_fn_from_config(level_config.spawn)
+            spawn_fn = create_spawn_fn_from_config(level_config.spawn, rover_nx=self._raw_env.cfg.rover_nx)
         # Reset toggleable params to defaults before applying level overrides
         defaults = {
             "randomize_mass": False,
@@ -368,8 +369,16 @@ def main():
     n_worlds = training_cfg["n_worlds"]
     device = torch.device("cpu")
 
+    # Set seed for reproducibility
+    seed = training_cfg.get("seed", None)
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        print(f"[Seed] Set torch/numpy seed to {seed}")
+
     # Create env config and spawn function
     env_cfg = config_to_env_config(config, device="cpu")
+    env_cfg.drone_state_type = policy_cfg["drone"].get("state_type", "euler")
     spawn_fn = get_spawn_fn_from_config(config)
 
     # Curriculum
@@ -379,7 +388,7 @@ def main():
         curriculum_manager = CurriculumManager(curriculum_cfg)
         print(f"[Curriculum] Enabled with {len(curriculum_cfg.levels)} levels")
         print(f"[Curriculum] Advance threshold: {curriculum_cfg.advance_threshold}")
-        print(f"[Curriculum] Starting at level 0: {curriculum_cfg.levels[0].name}")
+        print(f"[Curriculum] Starting at level 1: {curriculum_cfg.levels[0].name}")
 
         initial_params = curriculum_manager.get_env_params()
         for param_name, param_value in initial_params.items():
@@ -387,7 +396,7 @@ def main():
                 setattr(env_cfg, param_name, param_value)
 
         if "spawn" in initial_params and initial_params["spawn"]:
-            spawn_fn = create_spawn_fn_from_config(initial_params["spawn"])
+            spawn_fn = create_spawn_fn_from_config(initial_params["spawn"], rover_nx=env_cfg.rover_nx)
 
     # Set up results directory
     if args.resume_run is not None:
@@ -513,6 +522,8 @@ def main():
         mpc_horizon=d_cfg["mpc_horizon"],
         mpc_dt=d_cfg["mpc_dt"],
         cost_net_sizes=d_cfg["cost_net_sizes"],
+        state_type=d_cfg.get("state_type", "euler"),
+        integrator=d_cfg.get("integrator", "rk4"),
         roll_pitch_max=env_cfg.roll_pitch_max,
         yaw_max=env_cfg.yaw_max,
         thrust_min=env_cfg.thrust_min,
@@ -526,7 +537,8 @@ def main():
         pos_offset_max=d_cfg["pos_offset_max"],
     )
 
-    rover_policy = RoverACMPCGaussianPolicy(
+    RoverPolicyCls = X3RoverACMPCGaussianPolicy if env_cfg.rover_type == "x3" else RoverACMPCGaussianPolicy
+    rover_policy_kwargs = dict(
         observation_space=rover_obs_space,
         action_space=rover_act_space,
         device=device,
@@ -538,6 +550,17 @@ def main():
         activation=r_cfg["activation"],
         pos_offset_max=r_cfg["pos_offset_max"],
     )
+    if env_cfg.rover_type == "x3":
+        rover_policy_kwargs.update(
+            vx_max=env_cfg.rover_vx_max,
+            vy_max=env_cfg.rover_vy_max,
+            wz_max=env_cfg.rover_wz_max,
+        )
+    else:
+        rover_policy_kwargs.update(
+            wheel_vel_max=env_cfg.rover_wheel_vel_max,
+        )
+    rover_policy = RoverPolicyCls(**rover_policy_kwargs)
 
     drone_critic = SharedCritic(
         observation_space=raw_env.shared_observation_space,
@@ -642,7 +665,7 @@ def main():
 
     # Create MAPPO_MPC agent with heterogeneous MPC state sizes
     agent = MAPPO_MPC(
-        mpc_state_sizes={"drone": 12, "rover": 6},
+        mpc_state_sizes={"drone": raw_env.drone_mpc_state_dim, "rover": raw_env.rover_mpc_state_dim},
         possible_agents=possible_agents,
         models=models,
         memories=memories,
@@ -673,7 +696,7 @@ def main():
         else:
             curriculum_manager.set_level(args.curriculum_level)
     elif args.resume_run is not None and curriculum_manager is not None:
-        print(f"[Curriculum] Warning: Resuming but no --curriculum-level specified. Starting at level 0.")
+        print(f"[Curriculum] Warning: Resuming but no --curriculum-level specified. Starting at level 1.")
 
     # Save learning config
     learning_config = {

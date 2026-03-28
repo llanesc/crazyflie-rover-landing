@@ -175,12 +175,12 @@ def main():
     if args.level is not None:
         curriculum_cfg = config.get("curriculum", {})
         levels = curriculum_cfg.get("levels", [])
-        if args.level < 0 or args.level >= len(levels):
+        if args.level < 1 or args.level > len(levels):
             raise ValueError(
                 f"--level {args.level} out of range. "
-                f"Available levels: 0-{len(levels) - 1}"
+                f"Available levels: 1-{len(levels)}"
             )
-        level = levels[args.level]
+        level = levels[args.level - 1]
         spawn_cfg = {}
         if "drone_spawn" in level:
             spawn_cfg["drone"] = level["drone_spawn"]
@@ -189,7 +189,7 @@ def main():
         if spawn_cfg:
             # Force rover to spawn stationary for eval
             spawn_cfg.setdefault("rover", {})["stationary"] = True
-            spawn_fn = create_spawn_fn_from_config(spawn_cfg)
+            spawn_fn = create_spawn_fn_from_config(spawn_cfg, rover_nx=env_cfg.rover_nx)
         # Apply env overrides from the level
         if level.get("randomize_mass") is not None:
             env_cfg.randomize_mass = level["randomize_mass"]

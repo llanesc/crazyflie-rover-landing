@@ -1,11 +1,14 @@
 """Differentiable MPC planner for the Crazyflie drone (so_rpy, LINEAR_LS).
 
-Adapted from crazyflie-mape-crazyflow QuadrotorPlanner.
-Default model changed to cf2x_T350 and cost type fixed to linear_ls.
+Supports two state representations:
+- Euler (12D): [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
+- Quaternion (13D): [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+
+Control: [roll_cmd, pitch_cmd, yaw_cmd, thrust] (4D)
 """
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +25,11 @@ from leap_c.ocp.acados.planner import AcadosPlanner
 from leap_c.ocp.acados.torch import AcadosDiffMpcCtx, AcadosDiffMpcTorch
 
 from crazyflie_rover_landing.leap_c.drone_ocp_linear_ls import (
-    NX,
+    NX_EULER,
+    NX_QUAT,
     NU,
+    StateType,
+    IntegratorType,
     create_drone_params_linear_ls,
     export_drone_ocp_linear_ls,
     get_drone_learnable_param_dim,
@@ -81,6 +87,8 @@ class DronePlannerConfig:
     dt: float = 0.01          # 100 Hz MPC
     T_horizon: float | None = None
     param_interface: QuadrotorAcadosParamInterface = "global"
+    state_type: StateType = "euler"
+    integrator: IntegratorType = "rk4"
     n_batch_max: int = 4096
     num_threads: int = 8
     drone_model: str = "cf2x_T350"
@@ -102,8 +110,7 @@ class DronePlannerConfig:
 class DronePlanner(AcadosPlanner[AcadosDiffMpcCtx]):
     """Differentiable MPC planner for the Crazyflie drone.
 
-    Uses so_rpy Euler dynamics and LINEAR_LS cost structure.
-    State (12D): [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
+    Supports both Euler (12D) and Quaternion (13D) state representations.
     Control (4D): [roll_cmd, pitch_cmd, yaw_cmd, thrust]
     """
 
@@ -114,6 +121,7 @@ class DronePlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         export_directory: Path | None = None,
     ):
         self.cfg = DronePlannerConfig() if cfg is None else cfg
+        self._nx = NX_QUAT if self.cfg.state_type == "quat" else NX_EULER
 
         drone_params = load_params("so_rpy", self.cfg.drone_model)
 
@@ -122,6 +130,7 @@ class DronePlanner(AcadosPlanner[AcadosDiffMpcCtx]):
                 N_horizon=self.cfg.N_horizon,
                 param_interface=self.cfg.param_interface,
                 drone_model=self.cfg.drone_model,
+                state_type=self.cfg.state_type,
                 roll_pitch_max=self.cfg.roll_pitch_max,
                 yaw_max=self.cfg.yaw_max,
                 pos_offset_max=self.cfg.pos_offset_max,
@@ -136,13 +145,21 @@ class DronePlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             N_horizon=self.cfg.N_horizon,
         )
 
+        ocp_name = (
+            "drone_so_rpy_quat_linear_ls"
+            if self.cfg.state_type == "quat"
+            else "drone_so_rpy_euler_linear_ls"
+        )
+
         ocp = export_drone_ocp_linear_ls(
             param_manager=param_manager,
-            name="drone_so_rpy_euler_linear_ls",
+            name=ocp_name,
             N_horizon=self.cfg.N_horizon,
             T_horizon=self.cfg.T_horizon,
             dt=self.cfg.dt,
             drone_model=self.cfg.drone_model,
+            state_type=self.cfg.state_type,
+            integrator=self.cfg.integrator,
             velocity_max=self.cfg.velocity_max,
             roll_pitch_max=self.cfg.roll_pitch_max,
             yaw_max=self.cfg.yaw_max,
@@ -183,7 +200,7 @@ class DronePlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         """Solve drone MPC.
 
         Args:
-            obs: Drone MPC state [x,y,z,rpy,vel,drpy], shape (B, 12).
+            obs: Drone MPC state, shape (B, nx).
             action: Unused.
             param: Learnable parameters, shape (B, n_learnable).
             ctx: Optional warm-start context.
@@ -194,8 +211,10 @@ class DronePlanner(AcadosPlanner[AcadosDiffMpcCtx]):
         p_stagewise = self.param_manager.combine_non_learnable_parameter_values(
             batch_size=obs.shape[0]
         )
-        x0 = obs[:, :NX]
+        x0 = obs[:, :self._nx]
         return self.diff_mpc(x0=x0, u0=action, p_global=param, p_stagewise=p_stagewise, ctx=ctx)
 
     def get_learnable_param_dim(self) -> int:
-        return get_drone_learnable_param_dim(self.cfg.N_horizon, self.cfg.param_interface)
+        return get_drone_learnable_param_dim(
+            self.cfg.N_horizon, self.cfg.param_interface, self.cfg.state_type
+        )

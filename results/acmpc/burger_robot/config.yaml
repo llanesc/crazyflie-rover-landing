@@ -5,9 +5,9 @@ environment:
   sim_freq: 500
   mellinger_freq: 500
   control_freq: 50
-  episode_length_s: 15.0
-  map_size_x: 20.0
-  map_size_y: 20.0
+  episode_length_s: 25.0
+  map_size_x: 10.0
+  map_size_y: 10.0
   drone_z_min: 0.0
   drone_z_max: 3.0
   rover_wheel_vel_max: 6.67    # rad/s  (MuJoCo ctrlrange)
@@ -17,6 +17,7 @@ environment:
   landing_vel_xy_tol: 0.1     # m/s — relative to rover pad
   landing_vel_z_tol: 0.2      # m/s — max descent speed (upward rejected)
   landing_attitude_tol: 0.05  # rad (~3°) — must be nearly level
+  # domain randomization parameters (applied only in "domain_rand" curriculum level)
   randomize_mass: false
   randomize_inertia: false
   mass_randomization_std: 0.003       # [kg]
@@ -25,10 +26,10 @@ environment:
   disturbance_force_std: 0.01         # [N]
   disturbance_torque_std: 1.0e-4      # [Nm]
   # Landing corridor
-  corridor_radius: 0.5       # m — horizontal distance to activate landing phase
+  corridor_radius: 0.3       # m — horizontal distance to activate landing phase
   corridor_transition: 0.1   # m — sigmoid blend width
-  max_descent_speed: 0.5     # m/s — max descent speed in corridor
-  max_drone_speed: 0.5       # m/s — drone speed above this gets penalized
+  max_descent_speed: 0.2     # m/s — max descent speed in corridor
+  max_drone_speed: 0.2       # m/s — drone speed above this gets penalized
 
 rewards:
   landing: 100.0
@@ -38,29 +39,36 @@ rewards:
   angle_coef: 0.01
   action_smoothness_thrust: 1.0
   action_smoothness_rpy: 0.2
-  action_smoothness_wheel: 0.03
+  action_smoothness_wheel: 0.001
   landing_velocity_coef: 2.0
   descent_speed_coef: 2.0       # penalty for exceeding max descent speed in corridor
   altitude_floor_coef: 0.3      # penalty for being below altitude floor during navigation
   time_penalty: 0.0             # per-step cost to discourage hovering
-  rover_stillness_coef: 0.5    # penalty for rover speed when drone is in landing corridor
-  rover_yawrate_coef: 0.5      # penalty for rover yaw rate when drone is in landing corridor
-  drone_velocity_coef: 0.5      # penalty for drone speed above max_drone_speed
+  rover_stillness_coef: 0.01    # penalty for rover speed when drone is in landing corridor
+  rover_yawrate_coef: 0.01      # penalty for rover yaw rate when drone is in landing corridor
+  drone_velocity_coef: 2.0      # penalty for drone speed above max_drone_speed
   rover_boundary_coef: 1.0    # per-step penalty for rover at arena boundary
 
 policy:
   value_net_sizes: [256, 256]
+  cost_net_activation: "relu"
   value_activation: "relu"
   drone:
-    hidden_sizes: [256, 256]
-    activation: "relu"
-    initial_log_std: [-0.5, -0.5, -1.0, -1.3]
+    mpc_horizon: 2
+    mpc_dt: 0.02
+    cost_net_sizes: [256, 256]
+    state_type: "euler"        # "euler" (12D) or "quat" (13D quat+body rates)
+    integrator: "rk4"          # "rk4" or "euler" (forward Euler)
     roll_pitch_max: 0.1
-    yaw_max: 0.05               
+    yaw_max: 0.05
+    pos_offset_max: 0.25
+    initial_log_std: [-0.5, -0.5, -1.0, -1.3]
   rover:
-    hidden_sizes: [256, 256]
-    activation: "relu"
-    initial_log_std: [-0.8, -0.8]
+    mpc_horizon: 2
+    mpc_dt: 0.02
+    cost_net_sizes: [256, 256]
+    pos_offset_max: 0.25
+    initial_log_std: [-0.1, -0.1]
 
 training:
   timesteps: 2_000_000
@@ -113,8 +121,8 @@ curriculum:
       drone_spawn:
         z_min: 0.5
         z_max: 1.5
-        x_half: 1.5
-        y_half: 1.5
+        x_half: 1.0
+        y_half: 1.0
       rover_spawn:
         stationary: false
         max_speed: 0.07   # m/s linear wheel vel  (~30% of 0.220 m/s max)
@@ -122,9 +130,9 @@ curriculum:
     - name: "medium_rover"
       drone_spawn:
         z_min: 0.5
-        z_max: 2.0
-        x_half: 2.5
-        y_half: 2.5
+        z_max: 1.5
+        x_half: 1.0
+        y_half: 1.0
       rover_spawn:
         stationary: false
         max_speed: 0.14   # m/s  (~60% of max)
@@ -132,9 +140,9 @@ curriculum:
     - name: "fast_rover"
       drone_spawn:
         z_min: 0.5
-        z_max: 2.0
-        x_half: 3.5
-        y_half: 3.5
+        z_max: 1.5
+        x_half: 1.5
+        y_half: 1.5
       rover_spawn:
         stationary: false
         max_speed: 0.20   # m/s  (~90% of max)
@@ -146,9 +154,9 @@ curriculum:
     - name: "domain_rand"
       drone_spawn:
         z_min: 0.5
-        z_max: 2.0
-        x_half: 5.5
-        y_half: 5.5
+        z_max: 1.5
+        x_half: 1.5
+        y_half: 1.5
       rover_spawn:
         stationary: false
         max_speed: 0.20   # m/s
@@ -162,12 +170,11 @@ curriculum:
       drone_spawn:
         z_min: 0.5
         z_max: 2.0
-        x_half: 3.0
-        y_half: 3.0
+        x_half: 2.0
+        y_half: 2.0
       rover_spawn:
         stationary: false
         max_speed: 0.22   # m/s  (physical max: r * wheel_vel_max = 0.033 * 6.67)
-      landing_vel_xy_tol: 0.05     # m/s — constrained landing velocity tolerance for fast rover
       landing_vel_z_tol: 0.2      # m/s — max descent speed (upward rejected)
       randomize_mass: true
       randomize_inertia: true

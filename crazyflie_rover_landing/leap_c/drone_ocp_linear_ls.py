@@ -1,16 +1,16 @@
 """Acados OCP for the Crazyflie drone attitude control with LINEAR_LS cost.
 
-Adapted from the crazyflie-mape-crazyflow quadrotor_ocp_linear_ls.py.
-The main change is the default drone model (cf2x_T350 instead of cf2x_L250).
+Supports two state representations:
+- Euler (12D): [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
+- Quaternion (13D): [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+
+Control: [roll_cmd, pitch_cmd, yaw_cmd, thrust] (4D)
 
 Cost: J = 0.5 * (y - y_ref)' W (y - y_ref),  y = [x; u]
 
 The neural network outputs:
   1. W (weights)  — log-scaled diagonal entries
   2. y_ref        — linearly scaled to physical bounds
-
-State:   [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw] (12D)
-Control: [roll_cmd, pitch_cmd, yaw_cmd, thrust]                         (4D)
 """
 
 from typing import Literal
@@ -21,100 +21,28 @@ import numpy as np
 from acados_template import AcadosOcp
 
 from drone_models.core import load_params
-from drone_models.so_rpy import symbolic_dynamics_euler
-from drone_models.utils.rotation import cs_rpy2matrix
 from leap_c.ocp.acados.parameters import AcadosParameter, AcadosParameterManager
 
 # State / control dimensions
-NX = 12   # [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
-NU = 4    # [roll_cmd, pitch_cmd, yaw_cmd, thrust]
-NY = NX + NU   # 16 — combined output for LINEAR_LS
+NX_EULER = 12  # [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
+NX_QUAT = 13   # [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+NX = NX_EULER   # Default (backward compat)
+NU = 4          # [roll_cmd, pitch_cmd, yaw_cmd, thrust]
 
-W_SIZE = NY       # diagonal weights
-YREF_SIZE = NY    # reference vector
-
+StateType = Literal["euler", "quat"]
+IntegratorType = Literal["rk4", "euler"]
 QuadrotorAcadosParamInterface = Literal["global", "stagewise"]
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Parameter creation
 # ---------------------------------------------------------------------------
-
-def _integrate_erk4(f_expl: ca.SX, x: ca.SX, u: ca.SX, p: ca.SX, dt: float) -> ca.SX:
-    ode = ca.Function("ode", [x, u, p], [f_expl])
-    k1 = ode(x, u, p)
-    k2 = ode(x + dt / 2 * k1, u, p)
-    k3 = ode(x + dt / 2 * k2, u, p)
-    k4 = ode(x + dt * k3, u, p)
-    return x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def define_so_rpy_euler_dynamics(
-    dt: float,
-    drone_model: str = "cf2x_T350",
-    mass: float | None = None,
-    gravity: float | None = None,
-) -> tuple[ca.SX, ca.SX, ca.SX]:
-    """Define discrete quadrotor dynamics with so_rpy Euler model + RK4.
-
-    Args:
-        dt: Integration timestep [s].
-        drone_model: Drone model identifier.
-        mass: Drone mass [kg]. None to load from drone_model.
-        gravity: Gravitational acceleration [m/s²]. None to load from drone_model.
-
-    Returns:
-        (x_next, x, u) CasADi SX expressions.
-    """
-    params = load_params("so_rpy", drone_model)
-    if mass is None:
-        mass = float(params["mass"])
-    if gravity is None:
-        gravity = float(np.abs(params["gravity_vec"][2]))
-
-    acc_coef = float(params["acc_coef"])
-    cmd_f_coef = float(params["cmd_f_coef"])
-    rpy_coef = np.array(params["rpy_coef"])
-    rpy_rates_coef = np.array(params["rpy_rates_coef"])
-    cmd_rpy_coef = np.array(params["cmd_rpy_coef"])
-
-    X = ca.SX.sym("x", NX)
-    U = ca.SX.sym("u", NU)
-
-    pos = X[0:3]
-    rpy = X[3:6]
-    vel = X[6:9]
-    drpy = X[9:12]
-
-    roll_cmd, pitch_cmd, yaw_cmd, thrust = U[0], U[1], U[2], U[3]
-
-    R = cs_rpy2matrix(rpy)
-
-    pos_dot = vel
-    rpy_dot = drpy
-    thrust_z = acc_coef + cmd_f_coef * thrust
-    vel_dot = R @ ca.vertcat(0, 0, thrust_z / mass) + ca.vertcat(0, 0, -gravity)
-    drpy_dot = ca.vertcat(
-        rpy_coef[0] * rpy[0] + rpy_rates_coef[0] * drpy[0] + cmd_rpy_coef[0] * roll_cmd,
-        rpy_coef[1] * rpy[1] + rpy_rates_coef[1] * drpy[1] + cmd_rpy_coef[1] * pitch_cmd,
-        rpy_coef[2] * rpy[2] + rpy_rates_coef[2] * drpy[2] + cmd_rpy_coef[2] * yaw_cmd,
-    )
-
-    X_dot = ca.vertcat(pos_dot, rpy_dot, vel_dot, drpy_dot)
-    p = ca.SX.sym("p_empty", 0)
-    X_next = _integrate_erk4(X_dot, X, U, p, dt)
-
-    return X_next, X, U
-
 
 def create_drone_params_linear_ls(
     N_horizon: int = 2,
     param_interface: QuadrotorAcadosParamInterface = "global",
     drone_model: str = "cf2x_T350",
+    state_type: StateType = "euler",
     roll_pitch_max: float = 0.5,
     yaw_max: float = 0.5,
     pos_offset_max: float = 2.0,
@@ -129,6 +57,7 @@ def create_drone_params_linear_ls(
         N_horizon: MPC horizon steps.
         param_interface: "global" or "stagewise".
         drone_model: Drone model identifier.
+        state_type: "euler" (12D) or "quat" (13D).
         roll_pitch_max: Max roll/pitch command [rad].
         yaw_max: Max yaw command [rad].
         pos_offset_max: Max position reference offset [m].
@@ -152,12 +81,20 @@ def create_drone_params_linear_ls(
     cmd_f_coef = float(drone_params["cmd_f_coef"])
     hover_thrust = (mass * gravity) / cmd_f_coef
 
+    nx = NX_QUAT if state_type == "quat" else NX_EULER
+
     state_end_stages = list(range(N_horizon + 1)) if param_interface == "stagewise" else []
     ctrl_end_stages = list(range(N_horizon)) if param_interface == "stagewise" else []
 
     # Weight log-bounds per state component
-    w_state_min_log = np.array([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
-    w_state_max_log = np.array([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.])
+    if state_type == "quat":
+        # [pos(3), quat(4), vel(3), ang_vel(3)] = 13D
+        w_state_min_log = np.array([-1., -1., -1., -2., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
+        w_state_max_log = np.array([2., 2., 2., 1., 1., 1., 1., 2., 2., 2., 1., 1., 1.])
+    else:
+        # [pos(3), rpy(3), vel(3), drpy(3)] = 12D
+        w_state_min_log = np.array([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
+        w_state_max_log = np.array([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.])
     w_ctrl_min_log = np.array([-1., -1., -1., -1.])
     w_ctrl_max_log = np.array([1., 1., 1., 1.])
 
@@ -165,16 +102,31 @@ def create_drone_params_linear_ls(
     w_ctrl_default_log = (w_ctrl_min_log + w_ctrl_max_log) / 2
 
     # Reference bounds (physical)
-    yref_state_low = np.array([
-        -pos_offset_max, -pos_offset_max, 0.,
-        -roll_pitch_max, -roll_pitch_max, -yaw_max,
-        -5., -5., -5., -10., -10., -10.
-    ])
-    yref_state_high = np.array([
-        pos_offset_max, pos_offset_max, 4.5,
-        roll_pitch_max, roll_pitch_max, yaw_max,
-        5., 5., 5., 10., 10., 10.
-    ])
+    if state_type == "quat":
+        # [pos(3), quat(4:xyzw), vel(3), ang_vel(3)] = 13D
+        yref_state_low = np.array([
+            -pos_offset_max, -pos_offset_max, 0.,
+            -1., -1., -1., -1.,
+            -5., -5., -5., -10., -10., -10.
+        ])
+        yref_state_high = np.array([
+            pos_offset_max, pos_offset_max, 4.5,
+            1., 1., 1., 1.,
+            5., 5., 5., 10., 10., 10.
+        ])
+        yref_state_default = np.array([0., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 0.])
+    else:
+        yref_state_low = np.array([
+            -pos_offset_max, -pos_offset_max, 0.,
+            -roll_pitch_max, -roll_pitch_max, -yaw_max,
+            -5., -5., -5., -10., -10., -10.
+        ])
+        yref_state_high = np.array([
+            pos_offset_max, pos_offset_max, 4.5,
+            roll_pitch_max, roll_pitch_max, yaw_max,
+            5., 5., 5., 10., 10., 10.
+        ])
+        yref_state_default = np.zeros(nx)
 
     return [
         AcadosParameter(
@@ -201,7 +153,7 @@ def create_drone_params_linear_ls(
         ),
         AcadosParameter(
             name="yref_state",
-            default=np.zeros(NX),
+            default=yref_state_default,
             space=gym.spaces.Box(low=yref_state_low, high=yref_state_high, dtype=np.float64),
             interface="learnable",
             end_stages=state_end_stages,
@@ -220,25 +172,37 @@ def create_drone_params_linear_ls(
     ]
 
 
+# ---------------------------------------------------------------------------
+# Learnable param dimension
+# ---------------------------------------------------------------------------
+
 def get_drone_learnable_param_dim(
     N_horizon: int,
     param_interface: QuadrotorAcadosParamInterface,
+    state_type: StateType = "euler",
 ) -> int:
     """Total dimension of learnable parameters for the drone OCP."""
+    nx = NX_QUAT if state_type == "quat" else NX_EULER
     if param_interface == "global":
-        return NX + NU + NX + NU  # 32
+        return nx + NU + nx + NU
     n_state_stages = N_horizon + 1
     n_ctrl_stages = N_horizon
-    return (NX + NX) * n_state_stages + (NU + NU) * n_ctrl_stages
+    return (nx + nx) * n_state_stages + (NU + NU) * n_ctrl_stages
 
+
+# ---------------------------------------------------------------------------
+# OCP export
+# ---------------------------------------------------------------------------
 
 def export_drone_ocp_linear_ls(
     param_manager: AcadosParameterManager,
-    name: str = "drone_so_rpy_euler_linear_ls",
+    name: str = "drone_so_rpy_linear_ls",
     N_horizon: int = 2,
     T_horizon: float = 0.02,
     dt: float = 0.01,
     drone_model: str = "cf2x_T350",
+    state_type: StateType = "euler",
+    integrator: IntegratorType = "rk4",
     velocity_max: float | None = None,
     roll_pitch_max: float = 0.5,
     yaw_max: float = 0.5,
@@ -256,6 +220,8 @@ def export_drone_ocp_linear_ls(
         T_horizon: Total horizon time [s].
         dt: Integration timestep [s].
         drone_model: Drone model identifier.
+        state_type: "euler" (12D) or "quat" (13D).
+        integrator: "rk4" or "euler" (forward Euler).
         velocity_max: Max velocity per axis [m/s]. None to disable.
         roll_pitch_max: Max roll/pitch command [rad].
         yaw_max: Max yaw command [rad].
@@ -267,6 +233,15 @@ def export_drone_ocp_linear_ls(
     Returns:
         Configured AcadosOcp.
     """
+    from .so_rpy_dynamics_sx import (
+        integrate_euler_sx,
+        integrate_rk4_sx,
+        symbolic_dynamics_euler_sx,
+        symbolic_dynamics_sx,
+    )
+
+    nx = NX_QUAT if state_type == "quat" else NX_EULER
+
     ocp = AcadosOcp()
     ocp.solver_options.N_horizon = N_horizon
     ocp.solver_options.tf = T_horizon
@@ -274,13 +249,37 @@ def export_drone_ocp_linear_ls(
     param_manager.assign_to_ocp(ocp)
 
     ocp.model.name = name
-    ocp.dims.nx = NX
+    ocp.dims.nx = nx
     ocp.dims.nu = NU
 
-    x_next, x, u = define_so_rpy_euler_dynamics(dt, drone_model, mass=mass, gravity=gravity)
-    ocp.model.x = x
-    ocp.model.u = u
-    ocp.model.disc_dyn_expr = x_next
+    # Load drone parameters and build SX dynamics
+    params = load_params("so_rpy", drone_model)
+    common_kwargs = dict(
+        model_rotor_vel=False,
+        mass=float(params["mass"]) if mass is None else mass,
+        gravity_vec=params["gravity_vec"],
+        J=params["J"],
+        J_inv=params["J_inv"],
+        acc_coef=params["acc_coef"],
+        cmd_f_coef=params["cmd_f_coef"],
+        rpy_coef=params["rpy_coef"],
+        rpy_rates_coef=params["rpy_rates_coef"],
+        cmd_rpy_coef=params["cmd_rpy_coef"],
+    )
+
+    if state_type == "quat":
+        X_dot, X, U, _ = symbolic_dynamics_sx(**common_kwargs)
+    else:
+        X_dot, X, U, _ = symbolic_dynamics_euler_sx(**common_kwargs)
+
+    # Discretize dynamics
+    if integrator == "rk4":
+        X_next = integrate_rk4_sx(X_dot, X, U, dt)
+    else:
+        X_next = integrate_euler_sx(X_dot, X, U, dt)
+    ocp.model.x = X
+    ocp.model.u = U
+    ocp.model.disc_dyn_expr = X_next
 
     # EXTERNAL cost with LINEAR_LS structure
     ocp.cost.cost_type = "EXTERNAL"
@@ -291,38 +290,46 @@ def export_drone_ocp_linear_ls(
     yref_state = param_manager.get("yref_state")
     yref_control = param_manager.get("yref_control")
 
-    y = ca.vertcat(x, u)
+    y = ca.vertcat(X, U)
     y_ref = ca.vertcat(yref_state, yref_control)
     W = ca.diag(ca.vertcat(w_state, w_control))
     W_e = ca.diag(w_state)
 
     y_res = y - y_ref
-    y_res_e = x - yref_state
+    y_res_e = X - yref_state
 
     ocp.model.cost_expr_ext_cost = 0.5 * (y_res.T @ W @ y_res)
     ocp.model.cost_expr_ext_cost_e = 0.5 * (y_res_e.T @ W_e @ y_res_e)
 
-    ocp.constraints.x0 = np.zeros(NX)
+    # Initial state constraint
+    if state_type == "quat":
+        ocp.constraints.x0 = np.array([0., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 0.])
+    else:
+        ocp.constraints.x0 = np.zeros(nx)
 
     # Load thrust limits if not provided
     if thrust_min is None or thrust_max is None:
-        drone_params = load_params("so_rpy", drone_model)
         if thrust_min is None:
-            thrust_min = float(drone_params["thrust_min"]) * 4
+            thrust_min = float(params["thrust_min"]) * 4
         if thrust_max is None:
-            thrust_max = float(drone_params["thrust_max"]) * 4
+            thrust_max = float(params["thrust_max"]) * 4
 
     ocp.constraints.lbu = np.array([-roll_pitch_max, -roll_pitch_max, -yaw_max, thrust_min])
     ocp.constraints.ubu = np.array([roll_pitch_max, roll_pitch_max, yaw_max, thrust_max])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 
+    # Velocity constraint indices depend on state type
     if velocity_max is not None:
+        if state_type == "quat":
+            vel_idx = np.array([7, 8, 9])
+        else:
+            vel_idx = np.array([6, 7, 8])
         ocp.constraints.lbx = np.array([-velocity_max, -velocity_max, -velocity_max])
         ocp.constraints.ubx = np.array([velocity_max, velocity_max, velocity_max])
-        ocp.constraints.idxbx = np.array([6, 7, 8])
+        ocp.constraints.idxbx = vel_idx
         ocp.constraints.lbx_e = np.array([-velocity_max, -velocity_max, -velocity_max])
         ocp.constraints.ubx_e = np.array([velocity_max, velocity_max, velocity_max])
-        ocp.constraints.idxbx_e = np.array([6, 7, 8])
+        ocp.constraints.idxbx_e = vel_idx
 
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
     ocp.solver_options.hessian_approx = "EXACT"

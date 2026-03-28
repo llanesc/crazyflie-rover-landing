@@ -49,6 +49,10 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
 
     kwargs = {}
 
+    # Rover type
+    if "rover_type" in env_cfg:
+        kwargs["rover_type"] = env_cfg["rover_type"]
+
     # Environment settings
     if "drone_model" in env_cfg:
         kwargs["drone_model"] = env_cfg["drone_model"]
@@ -65,8 +69,9 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
 
-    # Rover params
-    for key in ("rover_wheel_vel_max", "rover_platform_radius", "rover_height"):
+    # Rover params (common + type-specific)
+    for key in ("rover_wheel_vel_max", "rover_platform_radius", "rover_height",
+                "rover_vx_max", "rover_vy_max", "rover_wz_max"):
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
 
@@ -92,19 +97,21 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
         "landing": "reward_landing",
         "crash": "reward_crash",
         "boundary": "reward_boundary",
-        "proximity_coef": "reward_proximity_coef",
-        "proximity_decay": "reward_proximity_decay",
+        "progress_coef": "reward_progress_coef",
         "angle_coef": "reward_angle_coef",
         "action_smoothness_thrust": "reward_action_smoothness_thrust",
         "action_smoothness_rpy": "reward_action_smoothness_rpy",
-        "action_smoothness_accel": "reward_action_smoothness_accel",
-        "action_smoothness_yawrate": "reward_action_smoothness_yawrate",
+        "action_smoothness_wheel": "reward_action_smoothness_wheel",
+        "action_smoothness_vx": "reward_action_smoothness_vx",
+        "action_smoothness_vy": "reward_action_smoothness_vy",
+        "action_smoothness_wz": "reward_action_smoothness_wz",
         "landing_velocity_coef": "reward_landing_velocity_coef",
         "descent_speed_coef": "reward_descent_speed_coef",
         "altitude_floor_coef": "reward_altitude_floor_coef",
         "time_penalty": "reward_time_penalty",
         "rover_stillness_coef": "reward_rover_stillness_coef",
         "rover_yawrate_coef": "reward_rover_yawrate_coef",
+        "rover_lateral_coef": "reward_rover_lateral_coef",
         "drone_velocity_coef": "reward_drone_velocity_coef",
         "rover_boundary_coef": "reward_rover_boundary_coef",
     }
@@ -113,7 +120,8 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
             kwargs[cfg_key] = rewards_cfg[yaml_key]
 
     # Landing corridor settings
-    for key in ("corridor_radius", "corridor_transition", "max_descent_speed"):
+    for key in ("corridor_radius", "corridor_transition", "max_descent_speed",
+                "max_drone_speed"):
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
 
@@ -130,7 +138,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
     return LandingEnvConfig(**kwargs)
 
 
-def get_spawn_fn_from_config(config: dict) -> SpawnFn:
+def get_spawn_fn_from_config(config: dict, rover_nx: int | None = None) -> SpawnFn:
     """Create spawn function from experiment configuration.
 
     Uses curriculum level 0 spawn if curriculum is defined; otherwise falls
@@ -142,6 +150,11 @@ def get_spawn_fn_from_config(config: dict) -> SpawnFn:
     Returns:
         Spawn function with signature (key, N) -> (drone_pos, rover_state).
     """
+    # Infer rover state dimension from rover_type if not provided
+    if rover_nx is None:
+        rover_type = config.get("environment", {}).get("rover_type", "burger")
+        rover_nx = 7 if rover_type == "x3" else 6
+
     # Check if curriculum defines an initial spawn
     curriculum_cfg = config.get("curriculum", {})
     if curriculum_cfg.get("enabled", False):
@@ -154,10 +167,10 @@ def get_spawn_fn_from_config(config: dict) -> SpawnFn:
             if "rover_spawn" in level0:
                 spawn_cfg["rover"] = level0["rover_spawn"]
             if spawn_cfg:
-                return create_spawn_fn_from_config(spawn_cfg)
+                return create_spawn_fn_from_config(spawn_cfg, rover_nx=rover_nx)
 
     spawn_cfg = config.get("environment", {}).get("spawn", {})
-    return create_spawn_fn_from_config(spawn_cfg)
+    return create_spawn_fn_from_config(spawn_cfg, rover_nx=rover_nx)
 
 
 def get_training_config(config: dict) -> dict:
@@ -220,6 +233,8 @@ def get_policy_config(config: dict) -> dict:
             "mpc_horizon": drone_cfg.get("mpc_horizon", 2),
             "mpc_dt": drone_cfg.get("mpc_dt", 0.01),
             "cost_net_sizes": drone_cfg.get("cost_net_sizes", [256, 256]),
+            "state_type": drone_cfg.get("state_type", "euler"),
+            "integrator": drone_cfg.get("integrator", "rk4"),
             "roll_pitch_max": drone_cfg.get("roll_pitch_max", 0.5),
             "yaw_max": drone_cfg.get("yaw_max", 0.5),
             "pos_offset_max": drone_cfg.get("pos_offset_max", 2.0),

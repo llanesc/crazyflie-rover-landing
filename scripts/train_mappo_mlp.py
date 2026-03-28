@@ -109,7 +109,7 @@ class TerminationLoggingWrapper:
         print(f"[Curriculum] Level change → {level_idx}: {level_config.name}")
         spawn_fn = None
         if level_config.spawn:
-            spawn_fn = create_spawn_fn_from_config(level_config.spawn)
+            spawn_fn = create_spawn_fn_from_config(level_config.spawn, rover_nx=self._raw_env.cfg.rover_nx)
         # Reset toggleable params to defaults before applying level overrides
         defaults = {
             "randomize_mass": False,
@@ -372,6 +372,13 @@ def main():
     n_worlds = training_cfg["n_worlds"]
     device = torch.device("cpu")
 
+    # Set seed for reproducibility
+    seed = training_cfg.get("seed", None)
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        print(f"[Seed] Set torch/numpy seed to {seed}")
+
     # Create env config and spawn function
     env_cfg = config_to_env_config(config, device="cpu")
     env_cfg.roll_pitch_max = policy_cfg["drone"]["roll_pitch_max"]
@@ -385,7 +392,7 @@ def main():
         curriculum_manager = CurriculumManager(curriculum_cfg)
         print(f"[Curriculum] Enabled with {len(curriculum_cfg.levels)} levels")
         print(f"[Curriculum] Advance threshold: {curriculum_cfg.advance_threshold}")
-        print(f"[Curriculum] Starting at level 0: {curriculum_cfg.levels[0].name}")
+        print(f"[Curriculum] Starting at level 1: {curriculum_cfg.levels[0].name}")
 
         initial_params = curriculum_manager.get_env_params()
         for param_name, param_value in initial_params.items():
@@ -393,7 +400,7 @@ def main():
                 setattr(env_cfg, param_name, param_value)
 
         if "spawn" in initial_params and initial_params["spawn"]:
-            spawn_fn = create_spawn_fn_from_config(initial_params["spawn"])
+            spawn_fn = create_spawn_fn_from_config(initial_params["spawn"], rover_nx=env_cfg.rover_nx)
 
     # Set up results directory
     if args.resume_run is not None:
@@ -657,7 +664,7 @@ def main():
         else:
             curriculum_manager.set_level(args.curriculum_level)
     elif args.resume_run is not None and curriculum_manager is not None:
-        print(f"[Curriculum] Warning: Resuming but no --curriculum-level specified. Starting at level 0.")
+        print(f"[Curriculum] Warning: Resuming but no --curriculum-level specified. Starting at level 1.")
 
     # Save learning config
     learning_config = {

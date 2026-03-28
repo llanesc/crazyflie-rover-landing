@@ -34,6 +34,8 @@ from crazyflie_rover_landing.policies import (
     RoverACMPCGaussianPolicy,
     SharedCritic,
 )
+from crazyflie_rover_landing.leap_c.x3_rover_policy_linear_ls import X3RoverACMPCGaussianPolicy
+from crazyflie_rover_landing.leap_c.x3_rover_policy_linear_ls import X3RoverACMPCGaussianPolicy
 from crazyflie_rover_landing.preprocessors import PartialRunningStandardScaler
 from crazyflie_rover_landing.utils import (
     load_experiment_config,
@@ -146,18 +148,19 @@ def main():
     device = torch.device("cpu")
 
     env_cfg = config_to_env_config(config, device="cpu")
+    env_cfg.drone_state_type = policy_cfg["drone"].get("state_type", "euler")
     spawn_fn = get_spawn_fn_from_config(config)
 
     # Override spawn with specific curriculum level if requested
     if args.level is not None:
         curriculum_cfg = config.get("curriculum", {})
         levels = curriculum_cfg.get("levels", [])
-        if args.level < 0 or args.level >= len(levels):
+        if args.level < 1 or args.level > len(levels):
             raise ValueError(
                 f"--level {args.level} out of range. "
-                f"Available levels: 0-{len(levels) - 1}"
+                f"Available levels: 1-{len(levels)}"
             )
-        level = levels[args.level]
+        level = levels[args.level - 1]
         spawn_cfg = {}
         if "drone_spawn" in level:
             spawn_cfg["drone"] = level["drone_spawn"]
@@ -166,7 +169,7 @@ def main():
         if spawn_cfg:
             # Force rover to spawn stationary for eval
             spawn_cfg.setdefault("rover", {})["stationary"] = True
-            spawn_fn = create_spawn_fn_from_config(spawn_cfg)
+            spawn_fn = create_spawn_fn_from_config(spawn_cfg, rover_nx=env_cfg.rover_nx)
         # Apply env overrides from the level
         if level.get("randomize_mass") is not None:
             env_cfg.randomize_mass = level["randomize_mass"]
@@ -288,6 +291,8 @@ def main():
         mpc_horizon=d_cfg["mpc_horizon"],
         mpc_dt=d_cfg["mpc_dt"],
         cost_net_sizes=d_cfg["cost_net_sizes"],
+        state_type=d_cfg.get("state_type", "euler"),
+        integrator=d_cfg.get("integrator", "rk4"),
         roll_pitch_max=env_cfg.roll_pitch_max,
         yaw_max=env_cfg.yaw_max,
         thrust_min=env_cfg.thrust_min,
@@ -301,7 +306,8 @@ def main():
         pos_offset_max=d_cfg["pos_offset_max"],
     )
 
-    rover_policy = RoverACMPCGaussianPolicy(
+    RoverPolicyCls = X3RoverACMPCGaussianPolicy if env_cfg.rover_type == "x3" else RoverACMPCGaussianPolicy
+    rover_policy_kwargs = dict(
         observation_space=env_skrl.observation_space("rover"),
         action_space=env_skrl.action_space("rover"),
         device=device,
@@ -313,6 +319,17 @@ def main():
         activation=r_cfg["activation"],
         pos_offset_max=r_cfg["pos_offset_max"],
     )
+    if env_cfg.rover_type == "x3":
+        rover_policy_kwargs.update(
+            vx_max=env_cfg.rover_vx_max,
+            vy_max=env_cfg.rover_vy_max,
+            wz_max=env_cfg.rover_wz_max,
+        )
+    else:
+        rover_policy_kwargs.update(
+            wheel_vel_max=env_cfg.rover_wheel_vel_max,
+        )
+    rover_policy = RoverPolicyCls(**rover_policy_kwargs)
 
     drone_critic = SharedCritic(
         observation_space=raw_env.shared_observation_space,
@@ -376,7 +393,7 @@ def main():
     )
 
     agent = MAPPO_MPC(
-        mpc_state_sizes={"drone": 12, "rover": 6},
+        mpc_state_sizes={"drone": raw_env.drone_mpc_state_dim, "rover": raw_env.rover_mpc_state_dim},
         possible_agents=possible_agents,
         models=models,
         memories=memories,

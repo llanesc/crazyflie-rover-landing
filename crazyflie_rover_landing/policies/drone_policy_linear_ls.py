@@ -1,7 +1,10 @@
 """SKRL Gaussian policy for the Crazyflie drone using LEAP-C (LINEAR_LS).
 
-Adapted from crazyflie-mape-crazyflow LeapCSharedGaussianPolicyLinearLS.
-Default drone model changed to cf2x_T350 and planner updated to DronePlanner.
+Supports two state representations:
+- Euler (12D): [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
+- Quaternion (13D): [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+
+Control: [roll_cmd, pitch_cmd, yaw_cmd, thrust] (4D)
 """
 
 from typing import Mapping, Optional, Sequence, Tuple, Union
@@ -14,7 +17,12 @@ import torch.nn as nn
 from skrl.models.torch import GaussianMixin, Model
 
 from crazyflie_rover_landing.leap_c.drone_planner import DronePlanner, DronePlannerConfig
-from crazyflie_rover_landing.leap_c.drone_ocp_linear_ls import NX, NU
+from crazyflie_rover_landing.leap_c.drone_ocp_linear_ls import (
+    NX_EULER,
+    NX_QUAT,
+    NU,
+    StateType,
+)
 
 
 def _get_activation(name: str) -> type[nn.Module]:
@@ -51,9 +59,6 @@ class DroneMPCLayerLinearLS(nn.Module):
     """Neural network layer wrapping DronePlanner with LINEAR_LS cost.
 
     obs (B, obs_dim) → W + y_ref → MPC → u0 (B, 4) → normalized in [-1, 1]
-
-    State [12D]: [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
-    Control [4D]: [roll_cmd, pitch_cmd, yaw_cmd, thrust]
     """
 
     def __init__(
@@ -63,6 +68,8 @@ class DroneMPCLayerLinearLS(nn.Module):
         mpc_dt: float = 0.01,
         cost_net_sizes: Sequence[int] = (256, 256),
         device: Union[str, torch.device] = "cpu",
+        state_type: StateType = "euler",
+        integrator: str = "rk4",
         roll_pitch_max: float = 0.5,
         yaw_max: float = 0.5,
         thrust_min: float = 1.23,
@@ -79,11 +86,15 @@ class DroneMPCLayerLinearLS(nn.Module):
         super().__init__()
         self.device = device
         self.mpc_horizon = mpc_horizon
+        self.state_type = state_type
+        self.nx = NX_QUAT if state_type == "quat" else NX_EULER
 
         planner_cfg = DronePlannerConfig(
             N_horizon=mpc_horizon,
             dt=mpc_dt,
             param_interface="global",
+            state_type=state_type,
+            integrator=integrator,
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             drone_model=drone_model,
@@ -104,30 +115,39 @@ class DroneMPCLayerLinearLS(nn.Module):
         self.gravity = gravity if gravity is not None else float(np.abs(drone_params["gravity_vec"][2]))
         hover_thrust = self.mass * self.gravity
 
-        # Action normalization buffers
+        # Action normalization buffers (safe for yaw_max=0)
         thrust_mean = (thrust_min + thrust_max) / 2.0
         thrust_scale = (thrust_max - thrust_min) / 2.0
         self.register_buffer("action_mean", torch.tensor([0., 0., 0., thrust_mean], dtype=torch.float32))
-        self.register_buffer("action_scale", torch.tensor([roll_pitch_max, roll_pitch_max, yaw_max, thrust_scale], dtype=torch.float32))
+        safe_yaw_scale = yaw_max if yaw_max > 0 else 1.0
+        self.register_buffer("action_scale", torch.tensor([roll_pitch_max, roll_pitch_max, safe_yaw_scale, thrust_scale], dtype=torch.float32))
 
-        # Weight log-scale bounds
-        self.register_buffer("w_state_min_log", torch.tensor([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.]))
-        self.register_buffer("w_state_max_log", torch.tensor([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.]))
+        # Weight log-scale bounds (state-type dependent)
+        if state_type == "quat":
+            self.register_buffer("w_state_min_log", torch.tensor([-1., -1., -1., -2., -2., -2., -2., -1., -1., -1., -1., -1., -1.]))
+            self.register_buffer("w_state_max_log", torch.tensor([2., 2., 2., 1., 1., 1., 1., 2., 2., 2., 1., 1., 1.]))
+        else:
+            self.register_buffer("w_state_min_log", torch.tensor([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.]))
+            self.register_buffer("w_state_max_log", torch.tensor([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.]))
         self.register_buffer("w_ctrl_min_log", torch.tensor([-1., -1., -1., -1.]))
         self.register_buffer("w_ctrl_max_log", torch.tensor([1., 1., 1., 1.]))
 
-        # Reference linear-scale bounds
+        # Reference linear-scale bounds (state-type dependent)
         self.register_buffer("pos_offset_min", torch.tensor([-pos_offset_max, -pos_offset_max, -pos_offset_max]))
         self.register_buffer("pos_offset_max_buf", torch.tensor([pos_offset_max, pos_offset_max, pos_offset_max]))
-        self.register_buffer("yref_state_min", torch.tensor([0., 0., 0., -roll_pitch_max, -roll_pitch_max, -yaw_max, -5., -5., -5., -10., -10., -10.]))
-        self.register_buffer("yref_state_max", torch.tensor([0., 0., 0., roll_pitch_max, roll_pitch_max, yaw_max, 5., 5., 5., 10., 10., 10.]))
+        if state_type == "quat":
+            self.register_buffer("yref_state_min", torch.tensor([0., 0., 0., -1., -1., -1., -1., -5., -5., -5., -10., -10., -10.]))
+            self.register_buffer("yref_state_max", torch.tensor([0., 0., 0., 1., 1., 1., 1., 5., 5., 5., 10., 10., 10.]))
+        else:
+            self.register_buffer("yref_state_min", torch.tensor([0., 0., 0., -roll_pitch_max, -roll_pitch_max, -yaw_max, -5., -5., -5., -10., -10., -10.]))
+            self.register_buffer("yref_state_max", torch.tensor([0., 0., 0., roll_pitch_max, roll_pitch_max, yaw_max, 5., 5., 5., 10., 10., 10.]))
         self.register_buffer("yref_ctrl_min", torch.tensor([-roll_pitch_max, -roll_pitch_max, -yaw_max, thrust_min]))
         self.register_buffer("yref_ctrl_max", torch.tensor([roll_pitch_max, roll_pitch_max, yaw_max, thrust_max]))
         self.register_buffer("hover_thrust_buf", torch.tensor(hover_thrust, dtype=torch.float32))
         self.register_buffer("thrust_min_buf", torch.tensor(thrust_min, dtype=torch.float32))
         self.register_buffer("thrust_max_buf", torch.tensor(thrust_max, dtype=torch.float32))
 
-        # param_dim = w_state(12) + w_ctrl(4) + yref_state(12) + yref_ctrl(4) = 32
+        # param_dim depends on state_type
         self.param_dim = self.planner.get_learnable_param_dim()
 
         self.cost_net = _build_mlp(
@@ -140,7 +160,7 @@ class DroneMPCLayerLinearLS(nn.Module):
 
         Args:
             obs: (B, obs_dim) observations (potentially normalized).
-            state: (B, 12) raw MPC state [pos, rpy, vel, drpy].
+            state: (B, nx) raw MPC state.
 
         Returns:
             (B, 4) normalized action in [-1, 1].
@@ -154,12 +174,11 @@ class DroneMPCLayerLinearLS(nn.Module):
         self, net_out: torch.Tensor, batch_size: int, state: torch.Tensor
     ) -> torch.Tensor:
         """Scale [0,1] network output to MPC parameters (global interface)."""
-        # Global interface: single set of weights/refs shared across all stages
-        # Layout: w_state(12) + w_ctrl(4) + yref_state(12) + yref_ctrl(4)
-        w_state_raw = net_out[:, :NX]
-        w_ctrl_raw = net_out[:, NX:NX + NU]
-        yref_state_raw = net_out[:, NX + NU:NX + NU + NX]
-        yref_ctrl_raw = net_out[:, NX + NU + NX:NX + NU + NX + NU]
+        nx = self.nx
+        w_state_raw = net_out[:, :nx]
+        w_ctrl_raw = net_out[:, nx:nx + NU]
+        yref_state_raw = net_out[:, nx + NU:nx + NU + nx]
+        yref_ctrl_raw = net_out[:, nx + NU + nx:nx + NU + nx + NU]
 
         # Log-scale weights
         log_w_state = self.w_state_min_log + w_state_raw * (self.w_state_max_log - self.w_state_min_log)
@@ -204,6 +223,8 @@ class DroneACMPCGaussianPolicy(GaussianMixin, Model):
         mpc_horizon: int = 2,
         mpc_dt: float = 0.01,
         cost_net_sizes: Sequence[int] = (256, 256),
+        state_type: StateType = "euler",
+        integrator: str = "rk4",
         roll_pitch_max: float = 0.5,
         yaw_max: float = 0.5,
         thrust_min: float = 1.23,
@@ -225,6 +246,7 @@ class DroneACMPCGaussianPolicy(GaussianMixin, Model):
         self._g_clip_log_std = clip_log_std
         self._g_min_log_std = min_log_std
         self._g_max_log_std = max_log_std
+        self.state_type = state_type
 
         obs_dim = gymnasium.spaces.flatdim(observation_space)
         action_dim = gymnasium.spaces.flatdim(action_space)
@@ -235,6 +257,8 @@ class DroneACMPCGaussianPolicy(GaussianMixin, Model):
             mpc_dt=mpc_dt,
             cost_net_sizes=cost_net_sizes,
             device=device,
+            state_type=state_type,
+            integrator=integrator,
             roll_pitch_max=roll_pitch_max,
             yaw_max=yaw_max,
             thrust_min=thrust_min,
@@ -267,8 +291,9 @@ class DroneACMPCGaussianPolicy(GaussianMixin, Model):
         if "mpc_state" in inputs:
             state = inputs["mpc_state"]
         else:
-            # Fallback: extract pos(3) + rpy(3) + vel(3) + drpy(3) from observation
-            state = obs[:, :12]
+            # Fallback: extract from observation
+            nx = NX_QUAT if self.state_type == "quat" else NX_EULER
+            state = obs[:, :nx]
 
         mean_actions = self.mpc_layer(obs, state)
 

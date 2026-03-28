@@ -1,4 +1,5 @@
 environment:
+  rover_type: "burger"
   drone_model: "cf2x_T350"
   dynamics: "first_principles"
   sim_freq: 500
@@ -27,43 +28,44 @@ environment:
   corridor_radius: 0.5       # m — horizontal distance to activate landing phase
   corridor_transition: 0.1   # m — sigmoid blend width
   max_descent_speed: 0.5     # m/s — max descent speed in corridor
+  max_drone_speed: 0.5       # m/s — drone speed above this gets penalized
 
 rewards:
   landing: 100.0
   crash: -50.0
   boundary: -50.0
-  proximity_coef: 0.1
-  proximity_decay: 2.0
+  progress_coef: 10.0
   angle_coef: 0.01
   action_smoothness_thrust: 1.0
   action_smoothness_rpy: 0.2
-  action_smoothness_accel: 0.05
-  action_smoothness_yawrate: 0.01
+  action_smoothness_wheel: 0.03
   landing_velocity_coef: 2.0
   descent_speed_coef: 2.0       # penalty for exceeding max descent speed in corridor
   altitude_floor_coef: 0.3      # penalty for being below altitude floor during navigation
   time_penalty: 0.0             # per-step cost to discourage hovering
   rover_stillness_coef: 0.5    # penalty for rover speed when drone is in landing corridor
   rover_yawrate_coef: 0.5      # penalty for rover yaw rate when drone is in landing corridor
-  drone_velocity_coef: 0.05     # penalty for drone speed
+  drone_velocity_coef: 0.5      # penalty for drone speed above max_drone_speed
   rover_boundary_coef: 1.0    # per-step penalty for rover at arena boundary
 
 policy:
-  value_net_sizes: [128, 128]
+  value_net_sizes: [256, 256]
   cost_net_activation: "relu"
   value_activation: "relu"
   drone:
     mpc_horizon: 2
     mpc_dt: 0.02
-    cost_net_sizes: [128, 128]
-    roll_pitch_max: 0.2
+    cost_net_sizes: [256, 256]
+    state_type: "euler"        # "euler" (12D) or "quat" (13D quat+body rates)
+    integrator: "rk4"          # "rk4" or "euler" (forward Euler)
+    roll_pitch_max: 0.1
     yaw_max: 0.1
     pos_offset_max: 0.25
     initial_log_std: [-0.5, -0.5, -1.0, -1.3]
   rover:
     mpc_horizon: 2
     mpc_dt: 0.02
-    cost_net_sizes: [128, 128]
+    cost_net_sizes: [256, 256]
     pos_offset_max: 0.25
     initial_log_std: [-0.8, -0.8]
 
@@ -167,8 +169,8 @@ curriculum:
       drone_spawn:
         z_min: 0.5
         z_max: 2.0
-        x_half: 7.5
-        y_half: 7.5
+        x_half: 3.0
+        y_half: 3.0
       rover_spawn:
         stationary: false
         max_speed: 0.22   # m/s  (physical max: r * wheel_vel_max = 0.033 * 6.67)

@@ -158,7 +158,7 @@ def test_curriculum_manager():
     )
 
     manager = CurriculumManager(cfg)
-    assert manager.current_level == 0
+    assert manager.current_level == 1
     assert manager.landing_rate == 0.0
 
     # Record 8 successes out of 10 → window full, should advance
@@ -167,13 +167,13 @@ def test_curriculum_manager():
     for _ in range(2):
         manager.record_episode(False)
 
-    assert manager.current_level == 1, f"Expected level 1, got {manager.current_level}"
+    assert manager.current_level == 2, f"Expected level 2, got {manager.current_level}"
 
     # Record poor performance → should regress
     for _ in range(10):
         manager.record_episode(False)
 
-    assert manager.current_level == 0, f"Expected regression to level 0, got {manager.current_level}"
+    assert manager.current_level == 1, f"Expected regression to level 1, got {manager.current_level}"
 
 
 def test_load_curriculum_config():
