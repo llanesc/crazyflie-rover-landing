@@ -43,3 +43,4 @@ hardware/local_env_hardware/
 # Misc
 log*.csv
 params*.csv
+hardware/crazyflie-lib-python/

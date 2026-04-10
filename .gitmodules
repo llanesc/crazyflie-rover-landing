@@ -1,6 +1,3 @@
-[submodule "external/robotis_mujoco_menagerie"]
-	path = external/robotis_mujoco_menagerie
-	url = https://github.com/ROBOTIS-GIT/robotis_mujoco_menagerie.git
 [submodule "external/yahboom_rosmaster"]
 	path = external/yahboom_rosmaster
 	url = https://github.com/automaticaddison/yahboom_rosmaster.git

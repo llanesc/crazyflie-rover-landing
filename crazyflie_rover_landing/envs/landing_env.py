@@ -2,7 +2,7 @@
 
 Two cooperative agents:
   - "drone": Crazyflie CF2X_T350, controlled via attitude commands from ACMPC.
-  - "rover": Unicycle ground vehicle, controlled via [a, ω] from ACMPC.
+  - "rover": Yahboom RosMaster X3 mecanum rover, controlled via [vx, vy, wz].
 
 The drone earns a bonus when it lands on the rover with low velocity.
 Both agents receive the same cooperative reward at each step.
@@ -27,8 +27,7 @@ from crazyflow.utils import leaf_replace
 from drone_models.core import load_params
 
 from crazyflie_rover_landing.envs.landing_config import LandingEnvConfig
-from crazyflie_rover_landing.envs.rover_dynamics import rover_step_batched, WHEELBASE
-from crazyflie_rover_landing.envs.mecanum_dynamics import mecanum_step_batched
+from crazyflie_rover_landing.envs.mecanum_dynamics import mecanum_step_batched, WHEEL_VEL_MAX
 from crazyflie_rover_landing.envs.spawn import SpawnFn, create_default_spawn_fn
 
 
@@ -210,24 +209,6 @@ def _jit_check_oob(
         | (jnp.abs(drone_pos[:, 1]) > map_half_y)
         | (drone_pos[:, 2] > z_max)
     )
-
-
-@jax.jit
-def _jit_clamp_rover_burger(
-    rover_state: jnp.ndarray,
-    map_half_x: float,
-    map_half_y: float,
-) -> jnp.ndarray:
-    """Clamp burger rover (6-state) position to arena boundaries."""
-    x, y = rover_state[:, 0], rover_state[:, 1]
-    hit_any = (x < -map_half_x) | (x > map_half_x) | (y < -map_half_y) | (y > map_half_y)
-    return jnp.stack([
-        jnp.clip(x, -map_half_x, map_half_x),
-        jnp.clip(y, -map_half_y, map_half_y),
-        rover_state[:, 2], rover_state[:, 3],
-        jnp.where(hit_any, 0.0, rover_state[:, 4]),
-        jnp.where(hit_any, 0.0, rover_state[:, 5]),
-    ], axis=-1)
 
 
 @jax.jit
@@ -465,16 +446,12 @@ class LandingEnv(gym.Env):
         self._rover_type = self.cfg.rover_type
         self.render_mode = render_mode
 
-        # Per-axis rover action smoothness weights
-        if self._rover_type == "x3":
-            self._rover_smoothness_weights = jnp.array([
-                self.cfg.reward_action_smoothness_vx,
-                self.cfg.reward_action_smoothness_vy,
-                self.cfg.reward_action_smoothness_wz,
-            ])
-        else:
-            w = self.cfg.reward_action_smoothness_wheel
-            self._rover_smoothness_weights = jnp.array([w, w])
+        # Per-axis rover action smoothness weights (X3: vx, vy, wz)
+        self._rover_smoothness_weights = jnp.array([
+            self.cfg.reward_action_smoothness_vx,
+            self.cfg.reward_action_smoothness_vy,
+            self.cfg.reward_action_smoothness_wz,
+        ])
 
         if spawn_fn is None:
             spawn_fn = create_default_spawn_fn(
@@ -880,29 +857,26 @@ class LandingEnv(gym.Env):
 
     def _define_spaces(self):
         """Define per-agent observation and action spaces."""
-        is_x3 = self._rover_type == "x3"
-
         # Drone observation:
         #   own: pos(3) + vel(3) + rotmat_flat(9) + body_rates(3) = 18
-        #   rover: xy(2) + vel_xy(2) + heading_sincos(2) + speed(1) [+ lateral(1) if x3] = 7 or 8
+        #   rover: xy(2) + vel_xy(2) + heading_sincos(2) + speed(1) + lateral(1) = 8
         #   relative: pos(3) = 3
-        self.drone_obs_dim = 29 if is_x3 else 28
+        self.drone_obs_dim = 29
 
-        # Rover observation:
-        #   burger: pos(2)+cs(2)+speed(1)+omega(1) + rel_pos(3)+vel(3)+speed(1)+dist(1) = 14
-        #   x3:     pos(2)+cs(2)+vx(1)+vy(1)+wz(1) + rel_pos(3)+vel(3)+speed(1)+dist(1) = 15
-        self.rover_obs_dim = 15 if is_x3 else 14
+        # Rover observation (X3):
+        #   pos(2)+cs(2)+vx(1)+vy(1)+wz(1) + rel_pos(3)+vel(3)+speed(1)+dist(1) = 15
+        self.rover_obs_dim = 15
 
         # MPC state dimensions
         self._drone_state_type = self.cfg.drone_state_type
         self.drone_mpc_state_dim = 13 if self._drone_state_type == "quat" else 12
-        self.rover_mpc_state_dim = self.cfg.rover_nx  # 6 (burger) or 7 (x3)
+        self.rover_mpc_state_dim = self.cfg.rover_nx  # 7 (x3)
 
         # Shared state for centralized critic:
         #   drone: pos(3) + vel(3) + rpy(3) + body_rates(3) = 12
-        #   rover: pos(2) + vel_xy(2) + heading_sincos(2) + velocities + ωz = 8 or 9
+        #   rover: pos(2) + vel_xy(2) + heading_sincos(2) + vx(1) + vy(1) + ωz(1) = 9
         #   relative: drone_pos - rover_xy (3) = 3
-        self.shared_state_dim = 24 if is_x3 else 23
+        self.shared_state_dim = 24
 
         self.observation_space = spaces.Dict({
             "drone": spaces.Box(-np.inf, np.inf, (self.drone_obs_dim,), dtype=np.float32),
@@ -910,25 +884,15 @@ class LandingEnv(gym.Env):
         })
         self.observation_spaces = self.observation_space
 
-        # Rover action bounds depend on rover type
-        if is_x3:
-            rover_action_low = np.array(
-                [-self.cfg.rover_vx_max, -self.cfg.rover_vy_max, -self.cfg.rover_wz_max],
-                dtype=np.float32,
-            )
-            rover_action_high = np.array(
-                [self.cfg.rover_vx_max, self.cfg.rover_vy_max, self.cfg.rover_wz_max],
-                dtype=np.float32,
-            )
-        else:
-            rover_action_low = np.array(
-                [-self.cfg.rover_wheel_vel_max, -self.cfg.rover_wheel_vel_max],
-                dtype=np.float32,
-            )
-            rover_action_high = np.array(
-                [self.cfg.rover_wheel_vel_max, self.cfg.rover_wheel_vel_max],
-                dtype=np.float32,
-            )
+        # Rover action bounds (X3 body velocity commands)
+        rover_action_low = np.array(
+            [-self.cfg.rover_vx_max, -self.cfg.rover_vy_max, -self.cfg.rover_wz_max],
+            dtype=np.float32,
+        )
+        rover_action_high = np.array(
+            [self.cfg.rover_vx_max, self.cfg.rover_vy_max, self.cfg.rover_wz_max],
+            dtype=np.float32,
+        )
 
         self.action_space = spaces.Dict({
             "drone": spaces.Box(
@@ -1193,32 +1157,19 @@ class LandingEnv(gym.Env):
     # -------------------------------------------------------------------------
 
     def _extract_rover_values(self, rover_state: jnp.ndarray) -> dict:
-        """Extract rover-type-agnostic values from rover state.
+        """Extract rover values from X3 rover state.
 
         Returns dict with: xy, c, s, vel_xy (world), speed, omega, vx_body, vy_body, wz.
         """
         xy = rover_state[:, :2]
         c = rover_state[:, 2]
         s = rover_state[:, 3]
-
-        if self._rover_type == "x3":
-            vx_body = rover_state[:, 4]
-            vy_body = rover_state[:, 5]
-            wz = rover_state[:, 6]
-            vel_x_world = vx_body * c - vy_body * s
-            vel_y_world = vx_body * s + vy_body * c
-            speed = jnp.sqrt(vx_body ** 2 + vy_body ** 2)
-        else:
-            # burger: [x, y, c, s, v_L, v_R]
-            v_L = rover_state[:, 4]
-            v_R = rover_state[:, 5]
-            v = (v_L + v_R) * 0.5
-            vx_body = v
-            vy_body = jnp.zeros_like(v)
-            wz = (v_R - v_L) / WHEELBASE
-            vel_x_world = v * c
-            vel_y_world = v * s
-            speed = jnp.abs(v)
+        vx_body = rover_state[:, 4]
+        vy_body = rover_state[:, 5]
+        wz = rover_state[:, 6]
+        vel_x_world = vx_body * c - vy_body * s
+        vel_y_world = vx_body * s + vy_body * c
+        speed = jnp.sqrt(vx_body ** 2 + vy_body ** 2)
 
         vel_xy = jnp.stack([vel_x_world, vel_y_world], axis=-1)
         return {
@@ -1256,35 +1207,21 @@ class LandingEnv(gym.Env):
         drone_action[:, 3] = np.clip(drone_action[:, 3], self.cfg.thrust_min, self.cfg.thrust_max)
         self.drone_cmd = jnp.array(drone_action)
 
-        # Process and clip rover action
+        # Process and clip rover action (X3 body velocity commands)
         nu = self.cfg.rover_nu
         rover_action = np.array(actions.get("rover", np.zeros((N, nu))), copy=True).reshape(N, nu)
-        if self._rover_type == "x3":
-            rover_action[:, 0] = np.clip(rover_action[:, 0], -self.cfg.rover_vx_max, self.cfg.rover_vx_max)
-            rover_action[:, 1] = np.clip(rover_action[:, 1], -self.cfg.rover_vy_max, self.cfg.rover_vy_max)
-            rover_action[:, 2] = np.clip(rover_action[:, 2], -self.cfg.rover_wz_max, self.cfg.rover_wz_max)
-        else:
-            rover_action[:, 0] = np.clip(rover_action[:, 0], -self.cfg.rover_wheel_vel_max, self.cfg.rover_wheel_vel_max)
-            rover_action[:, 1] = np.clip(rover_action[:, 1], -self.cfg.rover_wheel_vel_max, self.cfg.rover_wheel_vel_max)
+        rover_action[:, 0] = np.clip(rover_action[:, 0], -self.cfg.rover_vx_max, self.cfg.rover_vx_max)
+        rover_action[:, 1] = np.clip(rover_action[:, 1], -self.cfg.rover_vy_max, self.cfg.rover_vy_max)
+        rover_action[:, 2] = np.clip(rover_action[:, 2], -self.cfg.rover_wz_max, self.cfg.rover_wz_max)
         self.rover_cmd = jnp.array(rover_action)
 
-        # Step rover dynamics
-        if self._rover_type == "x3":
-            self.rover_state = mecanum_step_batched(
-                self.rover_state, self.rover_cmd, self.cfg.dt,
-                self.cfg.rover_wheel_vel_max,
-            )
-            self.rover_state = _jit_clamp_rover_x3(
-                self.rover_state, self.cfg.map_half_x, self.cfg.map_half_y
-            )
-        else:
-            self.rover_state = rover_step_batched(
-                self.rover_state, self.rover_cmd, self.cfg.dt,
-                self.cfg.rover_wheel_vel_max,
-            )
-            self.rover_state = _jit_clamp_rover_burger(
-                self.rover_state, self.cfg.map_half_x, self.cfg.map_half_y
-            )
+        # Step rover dynamics (X3 mecanum)
+        self.rover_state = mecanum_step_batched(
+            self.rover_state, self.rover_cmd, self.cfg.dt, WHEEL_VEL_MAX,
+        )
+        self.rover_state = _jit_clamp_rover_x3(
+            self.rover_state, self.cfg.map_half_x, self.cfg.map_half_y
+        )
 
         # Step drone (Crazyflow)
         self.sim.attitude_control(self.drone_cmd[:, None, :])
@@ -1453,23 +1390,12 @@ class LandingEnv(gym.Env):
         rover_c = rover[:, 2]
         rover_s = rover[:, 3]
 
-        if self._rover_type == "x3":
-            rover_vx_body = rover[:, 4]
-            rover_vy_body = rover[:, 5]
-            rover_wz = rover[:, 6]
-            rover_speed = np.sqrt(rover_vx_body ** 2 + rover_vy_body ** 2)
-            vel_x_world = rover_vx_body * rover_c - rover_vy_body * rover_s
-            vel_y_world = rover_vx_body * rover_s + rover_vy_body * rover_c
-        else:
-            v_L = rover[:, 4]
-            v_R = rover[:, 5]
-            rover_v = (v_L + v_R) * 0.5
-            rover_wz = (v_R - v_L) / WHEELBASE
-            rover_speed = np.abs(rover_v)
-            rover_vx_body = rover_v
-            rover_vy_body = np.zeros_like(rover_v)
-            vel_x_world = rover_v * rover_c
-            vel_y_world = rover_v * rover_s
+        rover_vx_body = rover[:, 4]
+        rover_vy_body = rover[:, 5]
+        rover_wz = rover[:, 6]
+        rover_speed = np.sqrt(rover_vx_body ** 2 + rover_vy_body ** 2)
+        vel_x_world = rover_vx_body * rover_c - rover_vy_body * rover_s
+        vel_y_world = rover_vx_body * rover_s + rover_vy_body * rover_c
 
         rover_vel_xy = np.stack([vel_x_world, vel_y_world], axis=-1)
 
@@ -1486,10 +1412,9 @@ class LandingEnv(gym.Env):
             rover_s[:, None],                   # 1
             rover_c[:, None],                   # 1
             rover_speed[:, None],               # 1
+            rover_vy_body[:, None],             # 1 lateral speed
+            rel_pos,                            # 3
         ]
-        if self._rover_type == "x3":
-            drone_obs_parts.append(rover_vy_body[:, None])  # 1 lateral speed
-        drone_obs_parts.append(rel_pos)                     # 3
         drone_obs = np.concatenate(drone_obs_parts, axis=-1).astype(np.float32)
 
         # ---- Rover observation ----
@@ -1500,18 +1425,10 @@ class LandingEnv(gym.Env):
             rover_xy,                                   # 2
             rover_c[:, None],                           # 1
             rover_s[:, None],                           # 1
+            rover_vx_body[:, None],                     # 1
+            rover_vy_body[:, None],                     # 1
+            rover_wz[:, None],                          # 1
         ]
-        if self._rover_type == "x3":
-            rover_obs_parts += [
-                rover_vx_body[:, None],                 # 1
-                rover_vy_body[:, None],                 # 1
-                rover_wz[:, None],                      # 1
-            ]
-        else:
-            rover_obs_parts += [
-                rover_vx_body[:, None],                 # 1 body speed
-                rover_wz[:, None],                      # 1 yaw rate
-            ]
         rover_obs_parts += [
             rel_pos,                                    # 3
             drone_vel,                                  # 3
@@ -1534,20 +1451,11 @@ class LandingEnv(gym.Env):
         rover_c = rover[:, 2]
         rover_s = rover[:, 3]
 
-        if self._rover_type == "x3":
-            vx_body = rover[:, 4]
-            vy_body = rover[:, 5]
-            wz = rover[:, 6]
-            vel_x_world = vx_body * rover_c - vy_body * rover_s
-            vel_y_world = vx_body * rover_s + vy_body * rover_c
-        else:
-            v_L, v_R = rover[:, 4], rover[:, 5]
-            rover_v = (v_L + v_R) * 0.5
-            vx_body = rover_v
-            vy_body = None
-            wz = (v_R - v_L) / WHEELBASE
-            vel_x_world = rover_v * rover_c
-            vel_y_world = rover_v * rover_s
+        vx_body = rover[:, 4]
+        vy_body = rover[:, 5]
+        wz = rover[:, 6]
+        vel_x_world = vx_body * rover_c - vy_body * rover_s
+        vel_y_world = vx_body * rover_s + vy_body * rover_c
 
         rover_vel_xy = np.stack([vel_x_world, vel_y_world], axis=-1)
 
@@ -1567,24 +1475,16 @@ class LandingEnv(gym.Env):
             drone_pos,                              # 3
             drone_vel,                              # 3
             drone_rpy,                              # 3
-            drone_body_rates,                       # 3  → 12
+            drone_body_rates,                       # 3  -> 12
             rover_xy,                               # 2
             rover_vel_xy,                           # 2
             rover_s[:, None],                       # 1
             rover_c[:, None],                       # 1
+            vx_body[:, None],                       # 1
+            vy_body[:, None],                       # 1
+            wz[:, None],                            # 1  -> 21
+            rel_pos,                                # 3  -> 24
         ]
-        if self._rover_type == "x3":
-            parts += [
-                vx_body[:, None],                   # 1
-                vy_body[:, None],                   # 1
-                wz[:, None],                        # 1  → 21
-            ]
-        else:
-            parts += [
-                vx_body[:, None],                   # 1
-                wz[:, None],                        # 1  → 20
-            ]
-        parts.append(rel_pos)                       # 3  → 23 or 24
 
         shared = np.concatenate(parts, axis=-1).astype(np.float32)
         return shared
@@ -1681,9 +1581,8 @@ class LandingEnv(gym.Env):
         })
 
     def _build_render_model(self):
-        """Build a combined render-only MuJoCo model: drone scene + rover.
+        """Build a combined render-only MuJoCo model: drone scene + X3 rover.
 
-        Selects the rover mesh based on rover_type (burger or x3).
         Replicates Crazyflow's build_mjx_spec() and attaches the rover model
         with prefix "rover_". The resulting model/data are used solely for
         visualization; physics remain in self.sim.mj_model / JAX.
@@ -1691,16 +1590,10 @@ class LandingEnv(gym.Env):
         import mujoco
         from pathlib import Path
 
-        if self._rover_type == "x3":
-            rover_xml = (
-                Path(__file__).parents[2]
-                / "external/yahboom_rosmaster/rosmaster_x3.xml"
-            )
-        else:
-            rover_xml = (
-                Path(__file__).parents[2]
-                / "external/robotis_mujoco_menagerie/robotis_tb3/turtlebot3_burger.xml"
-            )
+        rover_xml = (
+            Path(__file__).parents[2]
+            / "crazyflie_rover_landing/meshes/rosmaster_x3.xml"
+        )
 
         # Build fresh spec matching Crazyflow's build_mjx_spec
         spec = mujoco.MjSpec.from_file(str(self.sim._xml_path))
@@ -1723,13 +1616,11 @@ class LandingEnv(gym.Env):
         self._render_data = mujoco.MjData(self._render_model)
 
         # Patch rover landing pad visual to match config radius
-        pad_geom_name = "rover_pad_geom" if self._rover_type == "x3" else None
-        if pad_geom_name is not None:
-            pad_id = mujoco.mj_name2id(
-                self._render_model, mujoco.mjtObj.mjOBJ_GEOM, pad_geom_name
-            )
-            if pad_id >= 0:
-                self._render_model.geom_size[pad_id, 0] = self.cfg.rover_platform_radius
+        pad_id = mujoco.mj_name2id(
+            self._render_model, mujoco.mjtObj.mjOBJ_GEOM, "rover_pad_geom"
+        )
+        if pad_id >= 0:
+            self._render_model.geom_size[pad_id, 0] = self.cfg.rover_platform_radius
 
         # Cache rover free-joint qpos address
         rover_joint_id = mujoco.mj_name2id(
@@ -1738,9 +1629,9 @@ class LandingEnv(gym.Env):
         self._rover_qpos_addr = int(self._render_model.jnt_qposadr[rover_joint_id])
 
     def render(self, world: int = 0) -> np.ndarray | None:
-        """Render the environment using MuJoCo with the TurtleBot3 Burger mesh.
+        """Render the environment using MuJoCo with the X3 rover mesh.
 
-        The drone is rendered via a combined render model (drone + burger).
+        The drone is rendered via a combined render model (drone + X3 rover).
 
         Args:
             world: Which parallel world to render (default 0).
@@ -1817,7 +1708,7 @@ class LandingEnv(gym.Env):
         half_th = np.arctan2(sth, cth) / 2.0
         # Freejoint z = 2*wheel_radius so wheel bottoms touch ground
         # (base body default pos already has +0.0325, but freejoint overrides it)
-        rover_z = 0.065 if self._rover_type == "x3" else 0.0
+        rover_z = 0.065  # X3 wheel radius offset
         addr = self._rover_qpos_addr
         self._render_data.qpos[addr:addr + 7] = [
             rx, ry, rover_z, np.cos(half_th), 0.0, 0.0, np.sin(half_th)

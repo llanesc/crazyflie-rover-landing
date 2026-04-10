@@ -11,9 +11,6 @@ def __getattr__(name):
     elif name == "MLPGaussianPolicy":
         from crazyflie_rover_landing.policies.mlp_policy import MLPGaussianPolicy
         return MLPGaussianPolicy
-    elif name == "RoverACMPCGaussianPolicy":
-        from crazyflie_rover_landing.policies.rover_policy_linear_ls import RoverACMPCGaussianPolicy
-        return RoverACMPCGaussianPolicy
     elif name == "SharedCritic":
         from crazyflie_rover_landing.policies.shared_critic import SharedCritic
         return SharedCritic
@@ -23,6 +20,5 @@ def __getattr__(name):
 __all__ = [
     "DroneACMPCGaussianPolicy",
     "MLPGaussianPolicy",
-    "RoverACMPCGaussianPolicy",
     "SharedCritic",
 ]

@@ -78,7 +78,7 @@ class X3RoverPlannerConfig:
     N_horizon: int       = 4
     dt: float            = 0.1          # 10 Hz rover MPC
     T_horizon: float | None = None
-    n_batch_max: int     = 4096
+    n_batch_max: int = 128
     num_threads: int     = 8
     pos_offset_max: float = 2.0
     vx_max: float        = _VX_MAX

@@ -89,7 +89,7 @@ class DronePlannerConfig:
     param_interface: QuadrotorAcadosParamInterface = "global"
     state_type: StateType = "euler"
     integrator: IntegratorType = "rk4"
-    n_batch_max: int = 4096
+    n_batch_max: int = 128
     num_threads: int = 8
     drone_model: str = "cf2x_T350"
     velocity_max: float | None = None

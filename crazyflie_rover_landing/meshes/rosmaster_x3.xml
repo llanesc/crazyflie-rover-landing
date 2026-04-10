@@ -1,0 +1,71 @@
+<!-- MuJoCo render-only model for the Yahboom RosMaster X3 mecanum robot.
+     Derived from yahboom_rosmaster_description URDF.
+     Screen holder removed from chassis mesh; flat landing pad added on top.
+
+     Physical parameters:
+       wheel_radius   = 0.0325 m
+       wheel_sep      = 0.169 m  (left-right center-to-center)
+       wheel_xoff     = 0.08 m   (front-rear from base center)
+       wheel_width    = 0.0304 m
+       total_height   = 0.26225 m (from ground)
+-->
+<mujoco model="rosmaster_x3">
+  <compiler meshdir="."
+            angle="radian"/>
+
+  <asset>
+    <mesh name="base"       file="rosmaster_x3/visual/base_link_X3_trimmed.STL"/>
+    <mesh name="wheel_fl"   file="rosmaster_x3/visual/front_left_wheel_X3.STL"/>
+    <mesh name="wheel_fr"   file="rosmaster_x3/visual/front_right_wheel_X3.STL"/>
+    <mesh name="wheel_bl"   file="rosmaster_x3/visual/back_left_wheel_X3.STL"/>
+    <mesh name="wheel_br"   file="rosmaster_x3/visual/back_right_wheel_X3.STL"/>
+
+    <material name="chassis"    rgba="0.15 0.15 0.15 1"/>
+    <material name="wheel"      rgba="0.25 0.25 0.25 1"/>
+    <material name="pad"        rgba="0.8 0.2 0.2 1"/>
+  </asset>
+
+  <worldbody>
+    <!-- base_link at wheel_radius above ground -->
+    <body name="base" pos="0 0 0.0325">
+      <freejoint name="base_joint"/>
+      <inertial pos="-0.031 0 0.107" mass="4.6"
+                diaginertia="0.03 0.04 0.02"/>
+
+      <!-- Chassis visual (trimmed — screen holder removed) -->
+      <geom type="mesh" mesh="base" material="chassis"
+            contype="0" conaffinity="0"/>
+
+      <!-- Landing pad: flat disc on custom 3D printed bracket mount -->
+      <!-- z=0.1775 in base frame = 0.213m above ground (base_link at 0.0325 + pad at 0.1775 + half_h 0.003) -->
+      <!-- radius patched at runtime to match rover_platform_radius from config -->
+      <geom name="pad_geom" type="cylinder" size="0.15 0.003" pos="0 0 0.1775" material="pad"
+            contype="0" conaffinity="0"/>
+
+      <!-- Wheels pushed to wheel_sep/2 = 0.0845 so they protrude from chassis -->
+      <body name="wheel_fl" pos="0.08 0.0845 -0.0325">
+        <joint name="wheel_fl_joint" type="hinge" axis="0 1 0"/>
+        <geom type="mesh" mesh="wheel_fl" material="wheel"
+              euler="1.5708 0 0" contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="wheel_fr" pos="0.08 -0.0845 -0.0325">
+        <joint name="wheel_fr_joint" type="hinge" axis="0 1 0"/>
+        <geom type="mesh" mesh="wheel_fr" material="wheel"
+              euler="1.5708 0 0" contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="wheel_bl" pos="-0.08 0.0845 -0.0325">
+        <joint name="wheel_bl_joint" type="hinge" axis="0 1 0"/>
+        <geom type="mesh" mesh="wheel_bl" material="wheel"
+              euler="1.5708 0 0" contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="wheel_br" pos="-0.08 -0.0845 -0.0325">
+        <joint name="wheel_br_joint" type="hinge" axis="0 1 0"/>
+        <geom type="mesh" mesh="wheel_br" material="wheel"
+              euler="1.5708 0 0" contype="0" conaffinity="0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

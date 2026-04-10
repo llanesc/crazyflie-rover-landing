@@ -10,16 +10,14 @@ from drone_models.core import load_params
 class LandingEnvConfig:
     """Configuration for the Crazyflie-rover cooperative landing environment.
 
-    Supports multiple rover types via the ``rover_type`` field:
-      - "burger": TurtleBot3 Burger differential-drive (NX=6, NU=2)
-      - "x3": Yahboom RosMaster X3 mecanum omnidirectional (NX=7, NU=3)
+    Uses the Yahboom RosMaster X3 mecanum omnidirectional rover (NX=7, NU=3).
 
     Two heterogeneous cooperative agents: a Crazyflie drone and a ground rover.
     Both agents collaborate to land the drone on the rover with minimal
     touchdown velocity.
 
     Attributes:
-        rover_type: Which rover model to use ("burger" or "x3").
+        rover_type: Rover model identifier ("x3").
         n_worlds: Number of parallel environment instances.
         sim_freq: Physics simulation frequency [Hz] (Crazyflow internal).
         mellinger_freq: Mellinger attitude control frequency [Hz].
@@ -37,10 +35,9 @@ class LandingEnvConfig:
         disturbance_force_std: Std of force disturbance [N].
         disturbance_torque_std: Std of torque disturbance [Nm].
 
-        rover_wheel_vel_max: Max wheel angular velocity command [rad/s].
-        rover_vx_max: (x3 only) Max body-frame forward velocity [m/s].
-        rover_vy_max: (x3 only) Max body-frame lateral velocity [m/s].
-        rover_wz_max: (x3 only) Max yaw rate command [rad/s].
+        rover_vx_max: Max body-frame forward velocity [m/s].
+        rover_vy_max: Max body-frame lateral velocity [m/s].
+        rover_wz_max: Max yaw rate command [rad/s].
         rover_platform_radius: Landing pad radius on rover [m].
         rover_height: Height of the landing pad surface above ground [m].
 
@@ -60,8 +57,8 @@ class LandingEnvConfig:
         device: JAX/Torch device string ("cpu" or "cuda").
     """
 
-    # Rover type: "burger" (differential-drive) or "x3" (mecanum)
-    rover_type: str = "burger"
+    # Rover type: "x3" (Yahboom RosMaster X3 mecanum)
+    rover_type: str = "x3"
 
     # Drone MPC state type: "euler" (12D) or "quat" (13D)
     drone_state_type: str = "euler"
@@ -94,13 +91,12 @@ class LandingEnvConfig:
     disturbance_torque_std: float = 1e-4
     disturbance_ou_theta: float = 2.0   # OU mean-reversion rate [1/s] (lower = smoother)
 
-    # Rover physical limits — burger (differential-drive)
-    rover_wheel_vel_max: float = 6.67   # rad/s  (MuJoCo ctrlrange for burger, motor limit for x3)
+    # Rover physical limits
     rover_platform_radius: float = 0.10  # Landing pad radius [m]
     landing_zone_radius: float = 0.07    # Safe landing zone radius [m] (smaller than pad — edge landings crash)
     rover_height: float = 0.152          # Height of landing pad surface above ground [m]
 
-    # Rover physical limits — x3 (mecanum) body velocity commands
+    # X3 mecanum body velocity commands
     rover_vx_max: float = 1.0           # m/s  (ROS /cmd_vel forward limit)
     rover_vy_max: float = 1.0           # m/s  (ROS /cmd_vel lateral limit)
     rover_wz_max: float = 5.0           # rad/s (ROS /cmd_vel yaw rate limit)
@@ -133,7 +129,7 @@ class LandingEnvConfig:
     reward_action_smoothness_thrust: float = 5.0
     reward_action_smoothness_rpy: float = 1.0
     reward_action_smoothness_wheel: float = 0.03
-    # X3 per-axis rover smoothness (overrides action_smoothness_wheel when rover_type=="x3")
+    # X3 per-axis rover smoothness
     reward_action_smoothness_vx: float = 0.03
     reward_action_smoothness_vy: float = 0.03
     reward_action_smoothness_wz: float = 0.001
@@ -209,17 +205,14 @@ class LandingEnvConfig:
     @property
     def rover_max_speed(self) -> float:
         """Max body linear speed [m/s]."""
-        if self.rover_type == "x3":
-            return self.rover_vx_max
-        from crazyflie_rover_landing.envs.rover_dynamics import WHEEL_RADIUS
-        return WHEEL_RADIUS * self.rover_wheel_vel_max
+        return self.rover_vx_max
 
     @property
     def rover_nx(self) -> int:
-        """Rover state dimension."""
-        return 7 if self.rover_type == "x3" else 6
+        """Rover state dimension (X3: 7)."""
+        return 7
 
     @property
     def rover_nu(self) -> int:
-        """Rover control dimension."""
-        return 3 if self.rover_type == "x3" else 2
+        """Rover control dimension (X3: 3)."""
+        return 3
