@@ -2,3 +2,15 @@
 	path = external/CrazySim
 	url = git@github.com:llanesc/CrazySim.git
 	branch = rover-landing
+[submodule "external/crazyflow"]
+	path = external/crazyflow
+	url = git@github.com:llanesc/crazyflow.git
+	branch = dev
+[submodule "external/leap-c"]
+	path = external/leap-c
+	url = git@github.com:llanesc/leap-c.git
+	branch = main
+[submodule "external/skrl"]
+	path = external/skrl
+	url = git@github.com:llanesc/skrl.git
+	branch = resume-support
