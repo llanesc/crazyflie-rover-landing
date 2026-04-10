@@ -1,0 +1,4 @@
+[submodule "external/CrazySim"]
+	path = external/CrazySim
+	url = git@github.com:llanesc/CrazySim.git
+	branch = rover-landing

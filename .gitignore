@@ -15,8 +15,9 @@ local_env_hardware/
 .idea/
 .claude/
 
-# External (submodules managed separately)
-external/
+# External build artifacts
+external/*/__pycache__/
+external/*/build/
 
 # OS
 .DS_Store
