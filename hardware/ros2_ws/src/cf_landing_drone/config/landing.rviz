@@ -1,0 +1,61 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: cf_landing_rviz_plugin/LandingPanel
+    Name: LandingPanel
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Value: true
+    - Class: rviz_default_plugins/RobotModel
+      Name: Rover Model
+      Enabled: true
+      Value: true
+      Description Source: Topic
+      Description Topic:
+        Value: /rover/robot_description
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+    - Class: rviz_default_plugins/Marker
+      Name: Drone
+      Enabled: true
+      Value: true
+      Topic:
+        Value: /cf_landing/drone_marker
+        Depth: 1
+    - Class: rviz_default_plugins/Marker
+      Name: Rover Pad
+      Enabled: true
+      Value: true
+      Topic:
+        Value: /cf_landing/rover_marker
+        Depth: 1
+  Global Options:
+    Fixed Frame: world
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0.5
+      Name: Current View
+Window Geometry:
+  Height: 800
+  Width: 1200

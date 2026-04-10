@@ -20,6 +20,12 @@ import yaml
 # Force CPU — Crazyflow (JAX) does not support GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["JAX_PLATFORMS"] = "cpu"
+
+# Acados — resolve from repo-local leap-c
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+_ACADOS_ROOT = os.path.join(_REPO_ROOT, "external", "leap-c", "external", "acados")
+os.environ.setdefault("ACADOS_SOURCE_DIR", _ACADOS_ROOT)
+os.environ["LD_LIBRARY_PATH"] = os.path.join(_ACADOS_ROOT, "lib") + ":" + os.environ.get("LD_LIBRARY_PATH", "")
 import logging
 logging.getLogger("jax._src.xla_bridge").setLevel(logging.WARNING)
 
@@ -148,7 +154,6 @@ def main():
     device = torch.device("cpu")
 
     env_cfg = config_to_env_config(config, device="cpu")
-    env_cfg.drone_state_type = policy_cfg["drone"].get("state_type", "euler")
     spawn_fn = get_spawn_fn_from_config(config)
 
     # Override spawn with specific curriculum level if requested

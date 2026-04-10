@@ -1,0 +1,178 @@
+{
+  "policy_type": "mlp",
+  "experiment_name": "X3",
+  "drone_model": "cf21B_500",
+  "n_worlds": 128,
+  "sim_freq": 500,
+  "control_freq": 50,
+  "episode_length_s": 25.0,
+  "map_size_x": 15.0,
+  "map_size_y": 15.0,
+  "rover_max_speed": 1.0,
+  "rover_platform_radius": 0.115,
+  "landing_z_tol": 0.05,
+  "landing_vel_xy_tol": 0.1,
+  "landing_vel_z_tol": 0.08,
+  "landing_attitude_tol": 0.05,
+  "drone_obs_dim": 29,
+  "rover_obs_dim": 15,
+  "shared_state_dim": 24,
+  "drone_policy": {
+    "hidden_sizes": [
+      256,
+      256
+    ],
+    "activation": "relu"
+  },
+  "rover_policy": {
+    "hidden_sizes": [
+      256,
+      256
+    ],
+    "activation": "relu"
+  },
+  "curriculum_levels": [
+    {
+      "name": "close_hover",
+      "params": {
+        "landing_zone_radius": 0.1
+      },
+      "spawn": {
+        "drone": {
+          "z_min": 0.5,
+          "z_max": 1.0,
+          "x_half": 0.5,
+          "y_half": 0.5
+        },
+        "rover": {
+          "stationary": true,
+          "x_half": 0.3,
+          "y_half": 0.3
+        }
+      }
+    },
+    {
+      "name": "nearby_approach",
+      "params": {
+        "landing_zone_radius": 0.09
+      },
+      "spawn": {
+        "drone": {
+          "z_min": 0.5,
+          "z_max": 1.5,
+          "x_half": 1.0,
+          "y_half": 1.0
+        },
+        "rover": {
+          "stationary": false,
+          "max_speed": 0.3,
+          "x_half": 0.5,
+          "y_half": 0.5
+        }
+      }
+    },
+    {
+      "name": "medium_rover",
+      "params": {
+        "landing_zone_radius": 0.08
+      },
+      "spawn": {
+        "drone": {
+          "z_min": 0.5,
+          "z_max": 1.5,
+          "x_half": 1.5,
+          "y_half": 1.5
+        },
+        "rover": {
+          "stationary": false,
+          "max_speed": 0.6,
+          "x_half": 0.5,
+          "y_half": 0.5
+        }
+      }
+    },
+    {
+      "name": "fast_rover",
+      "params": {
+        "landing_zone_radius": 0.07,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.002,
+        "inertia_randomization_std": 1e-06,
+        "enable_disturbance": true,
+        "disturbance_force_std": 0.005,
+        "disturbance_torque_std": 0.0001
+      },
+      "spawn": {
+        "drone": {
+          "z_min": 0.5,
+          "z_max": 1.5,
+          "x_half": 2.5,
+          "y_half": 2.5
+        },
+        "rover": {
+          "stationary": false,
+          "max_speed": 0.9,
+          "x_half": 0.7,
+          "y_half": 0.7
+        }
+      }
+    },
+    {
+      "name": "domain_rand",
+      "params": {
+        "landing_zone_radius": 0.06,
+        "landing_vel_z_tol": 0.05,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.002,
+        "inertia_randomization_std": 1e-06,
+        "enable_disturbance": true,
+        "disturbance_force_std": 0.01,
+        "disturbance_torque_std": 0.0003
+      },
+      "spawn": {
+        "drone": {
+          "z_min": 0.5,
+          "z_max": 1.5,
+          "x_half": 3.5,
+          "y_half": 3.5
+        },
+        "rover": {
+          "stationary": false,
+          "max_speed": 0.9,
+          "x_half": 1.0,
+          "y_half": 1.0
+        }
+      }
+    },
+    {
+      "name": "full_map",
+      "params": {
+        "landing_zone_radius": 0.05,
+        "landing_vel_z_tol": 0.05,
+        "randomize_mass": true,
+        "randomize_inertia": true,
+        "mass_randomization_std": 0.005,
+        "inertia_randomization_std": 1e-06,
+        "enable_disturbance": true,
+        "disturbance_force_std": 0.02,
+        "disturbance_torque_std": 0.0005
+      },
+      "spawn": {
+        "drone": {
+          "z_min": 0.5,
+          "z_max": 2.0,
+          "x_half": 4.5,
+          "y_half": 4.5
+        },
+        "rover": {
+          "stationary": false,
+          "max_speed": 1.0,
+          "x_half": 2.0,
+          "y_half": 2.0
+        }
+      }
+    }
+  ]
+}

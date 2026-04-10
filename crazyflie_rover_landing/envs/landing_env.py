@@ -115,22 +115,20 @@ def _jit_check_landing(
     rover_vel_xy: jnp.ndarray,
     rover_height: float,
     platform_radius: float,
+    landing_zone_radius: float,
     z_tol: float,
     vel_xy_tol: float,
     vel_z_tol: float,
     attitude_tol: float,
+    pad_contact: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Check landing and crash conditions for each world.
 
-    Landing is successful when:
-      - horizontal distance < platform_radius (drone is on the pad)
-      - drone z is within [rover_height - 0.05, rover_height + z_tol]
-      - relative XY speed (drone minus rover) < vel_xy_tol
-      - relative Z velocity is downward (<=0) and |rel_vz| < vel_z_tol
-      - |roll| < attitude_tol AND |pitch| < attitude_tol
+    Uses MJX contact detection when pad_contact is provided. The drone must
+    physically touch the pad (contact), be within the safe landing zone
+    (smaller than the pad), and satisfy soft-landing criteria.
 
-    Crash = drone hits the ground anywhere (z below rover_height + z_tol)
-    without satisfying landing conditions.
+    Landing on the pad edge (contact but outside landing_zone_radius) = crash.
 
     Args:
         drone_pos: (N, 3) drone positions.
@@ -140,10 +138,12 @@ def _jit_check_landing(
         rover_vel_xy: (N, 2) rover world-frame XY velocity.
         rover_height: Height of landing pad surface above ground [m].
         platform_radius: Rover landing pad radius [m].
+        landing_zone_radius: Safe landing zone radius [m] (< platform_radius).
         z_tol: Max height above rover pad for success [m].
         vel_xy_tol: Max relative XY speed at touchdown [m/s].
         vel_z_tol: Max descent speed at touchdown [m/s].
         attitude_tol: Max |roll| and |pitch| at touchdown [rad].
+        pad_contact: (N,) bool from MJX contact detection, or None for legacy mode.
 
     Returns:
         landed: (N,) bool — successful soft landing.
@@ -155,14 +155,9 @@ def _jit_check_landing(
     rel_vz = drone_vel[:, 2]  # rover has no vertical velocity
 
     rel_speed_xy = jnp.sqrt(rel_vx ** 2 + rel_vy ** 2)
-
     horiz_dist = jnp.linalg.norm(drone_pos[:, :2] - rover_xy, axis=-1)
 
-    # Drone is near ground level (at or below pad surface + tolerance)
-    near_ground = drone_pos[:, 2] < rover_height + z_tol
-
-    on_pad = (horiz_dist < platform_radius) & near_ground
-    # Only allow downward or zero vertical velocity (rel_vz <= 0), not upward
+    # Soft-landing criteria: low speed + level attitude
     low_speed = (
         (rel_speed_xy < vel_xy_tol)
         & (rel_vz <= 0.0)
@@ -170,8 +165,22 @@ def _jit_check_landing(
     )
     level_attitude = (jnp.abs(drone_rpy[:, 0]) < attitude_tol) & (jnp.abs(drone_rpy[:, 1]) < attitude_tol)
 
-    landed = on_pad & low_speed & level_attitude
-    crashed = near_ground & ~landed
+    if pad_contact is not None:
+        # Contact-based detection
+        touching_pad = pad_contact
+        in_safe_zone = horiz_dist < landing_zone_radius
+        # Ground crash: drone below safe altitude but not on pad
+        ground_hit = drone_pos[:, 2] < rover_height * 0.5
+        # Successful landing: contact + in safe zone + soft + level
+        landed = touching_pad & in_safe_zone & low_speed & level_attitude
+        # Crash: any contact that isn't a good landing, or ground hit
+        crashed = (touching_pad & ~landed) | ground_hit
+    else:
+        # Legacy position-threshold mode
+        near_ground = drone_pos[:, 2] < rover_height + z_tol
+        on_pad = (horiz_dist < landing_zone_radius) & near_ground
+        landed = on_pad & low_speed & level_attitude
+        crashed = near_ground & ~landed
 
     return landed, crashed
 
@@ -281,8 +290,11 @@ def _jit_compute_rewards(
     reward_rover_yawrate_coef: float,
     reward_rover_lateral_coef: float,
     reward_drone_velocity_coef: float,
+    reward_drone_xy_corridor_coef: float,
     max_drone_speed: float,
     reward_rover_boundary_coef: float,
+    reward_landing_precision_coef: float,
+    landing_zone_radius: float,
     map_half_x: float,
     map_half_y: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray, dict, jnp.ndarray, jnp.ndarray]:
@@ -349,6 +361,10 @@ def _jit_compute_rewards(
     excess_drone_speed = jnp.maximum(drone_speed - max_drone_speed, 0.0)
     r_drone_velocity = -reward_drone_velocity_coef * excess_drone_speed ** 2
 
+    # Drone XY speed penalty in corridor — force hover-then-descend (not glide)
+    drone_speed_xy = jnp.linalg.norm(drone_vel[:, :2], axis=-1)
+    r_drone_xy_corridor = -reward_drone_xy_corridor_coef * z_weight * drone_speed_xy ** 2
+
     # Angle penalty: penalize roll/pitch deviation
     r_angle = -reward_angle_coef * (drone_rpy[:, 0] ** 2 + drone_rpy[:, 1] ** 2)
 
@@ -376,6 +392,15 @@ def _jit_compute_rewards(
         0.0,
     )
 
+    # Landing precision bonus: reward inversely proportional to distance from pad center
+    # precision = 1.0 at center, 0.0 at landing_zone_radius edge
+    precision = jnp.where(
+        landed,
+        reward_landing_precision_coef * jnp.maximum(1.0 - horiz_dist / landing_zone_radius, 0.0),
+        0.0,
+    )
+    r_landing = r_landing + precision
+
     # Crash penalty
     r_crash = jnp.where(crashed, reward_crash, 0.0)
 
@@ -387,8 +412,8 @@ def _jit_compute_rewards(
 
     # Per-agent reward split: team + agent-specific
     team = r_xy + r_z + r_landing + r_time
-    drone_only = (r_descent + r_altitude + r_drone_velocity + r_angle
-                  + r_smooth_drone + r_crash + r_boundary)
+    drone_only = (r_descent + r_altitude + r_drone_velocity + r_drone_xy_corridor
+                  + r_angle + r_smooth_drone + r_crash + r_boundary)
     rover_only = r_rover_stillness + r_rover_yawrate + r_rover_lateral + r_smooth_rover + r_rover_boundary
 
     drone_reward = team + drone_only
@@ -411,6 +436,7 @@ def _jit_compute_rewards(
         "rover_lateral": r_rover_lateral,
         "rover_boundary": r_rover_boundary,
         "drone_velocity": r_drone_velocity,
+        "drone_xy_corridor": r_drone_xy_corridor,
     }
     return drone_reward.astype(jnp.float32), rover_reward.astype(jnp.float32), components, horiz_dist, vert_dist
 
@@ -504,6 +530,9 @@ class LandingEnv(gym.Env):
             device=self.cfg.device,
         )
 
+        # Add rover landing pad as a mocap body for contact-based landing detection
+        self._add_landing_pad_to_scene()
+
         # Override mass if provided
         if self.cfg.mass is not None:
             params = self.sim.data.params.replace(
@@ -514,13 +543,20 @@ class LandingEnv(gym.Env):
 
         self._apply_domain_randomization()
 
-        # Store base pipeline (without disturbance) for dynamic enable/disable
-        self._base_step_pipeline = self.sim.step_pipeline
+        # Store the core pipeline from Crazyflow (no injections)
+        self._core_step_pipeline = self.sim.step_pipeline
         self._disturbance_enabled = False
 
-        # Inject disturbance function into simulation pipeline if enabled
-        if self.cfg.enable_disturbance:
-            self._enable_disturbance()
+        # OU disturbance state: (N_worlds, 1_drone, 3) for force and torque
+        N = self.cfg.n_worlds
+        self._ou_force = jnp.zeros((N, 1, 3))
+        self._ou_torque = jnp.zeros((N, 1, 3))
+
+        # Pre-create ground effect function if configured (always-on, not toggled)
+        self._ge_fn = self._create_ground_effect_fn() if self.cfg.enable_ground_effect else None
+
+        # Build the full pipeline with current disturbance/GE settings
+        self._rebuild_step_pipeline()
 
         # Hover RPM from first_principles parameters
         fp_params = load_params("first_principles", self.cfg.drone_model)
@@ -530,6 +566,80 @@ class LandingEnv(gym.Env):
         mass = self.cfg.mass if self.cfg.mass is not None else float(fp_params["mass"])
         c_c = rpm2thrust[0] - mass * self.cfg.gravity / 4
         self.hover_rpm = float((-b_c + np.sqrt(b_c ** 2 - 4 * a_c * c_c)) / (2 * a_c))
+
+    def _add_landing_pad_to_scene(self):
+        """Add a mocap body representing the rover landing pad for contact detection.
+
+        The pad is a flat box at rover_height that moves with the rover each step.
+        Contact between the drone's collision geoms and this pad triggers landing detection.
+        """
+        import mujoco
+
+        spec = self.sim.spec
+        pad_body = spec.worldbody.add_body(
+            name="landing_pad",
+            mocap=True,
+            pos=[0.0, 0.0, self.cfg.rover_height],
+        )
+        # Pad thickness = 0.003m half-height (6mm total)
+        pad_body.add_geom(
+            name="pad_geom",
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=[self.cfg.rover_platform_radius, self.cfg.rover_platform_radius, 0.003],
+            contype=1,
+            conaffinity=1,
+        )
+
+        # Switch drone collision from sphere to box (better for flat landing)
+        # Shift col_box down so its bottom aligns with the legs/guards.
+        # In the drone XML: body at z=0.05 above freejoint, col_box at pos=[0,0,0]
+        # with half-height 0.02. Box bottom = 0.05 - 0.02 = 0.03 above freejoint.
+        # Legs touch ground at freejoint origin (z=0), so shift box down by 0.03.
+        for geom in spec.geoms:
+            if geom.name == "col_sphere:0":
+                geom.contype = 0
+                geom.conaffinity = 0
+            elif geom.name == "col_box:0":
+                geom.contype = 1
+                geom.conaffinity = 1
+                geom.pos = [0.0, 0.0, -0.03]  # shift down to align with leg tips
+
+        # Rebuild MJX model with the pad and updated collision geoms
+        self.sim.build_mjx()
+
+        # Store the mocap body index for fast updates
+        self._pad_mocap_id = self.sim.mj_model.body("landing_pad").mocapid[0]
+
+    def _sync_pad_to_rover(self):
+        """Update the landing pad mocap position to match the current rover state."""
+        rover = np.asarray(self.rover_state)
+        rover_xy = rover[:, :2]
+        pad_z = self.cfg.rover_height
+        # Build (N, 1, 3) mocap_pos — 1 mocap body per world
+        pad_pos = np.zeros((self.cfg.n_worlds, 1, 3))
+        pad_pos[:, 0, :2] = rover_xy
+        pad_pos[:, 0, 2] = pad_z
+        self.sim.mjx_data = self.sim.mjx_data.replace(
+            mocap_pos=self.sim.mjx_data.mocap_pos.at[:, self._pad_mocap_id, :].set(
+                jnp.array(pad_pos[:, 0, :])
+            )
+        )
+        # Invalidate mjx sync flag so next contacts() call re-syncs
+        self.sim.data = self.sim.data.replace(
+            core=self.sim.data.core.replace(mjx_synced=False)
+        )
+
+    def _check_pad_contact(self) -> np.ndarray:
+        """Check if the drone is in contact with the landing pad.
+
+        Returns:
+            (N,) bool array — True if drone is touching the pad in each world.
+        """
+        # contacts() triggers sync_sim2mjx (kinematics + collision) if needed
+        contact_flags = self.sim.contacts("drone:0")
+        # contact_flags shape: (N, max_contacts) — True where dist < 0 for drone geoms
+        # Reduce to per-world: any contact for the drone
+        return np.asarray(contact_flags.any(axis=-1))
 
     def _apply_domain_randomization(self, mask: jnp.ndarray | None = None):
         """Randomize mass and/or inertia for enabled worlds."""
@@ -554,41 +664,219 @@ class LandingEnv(gym.Env):
             J_rand = self.sim.data.params.J + J_noise
             randomize_inertia(self.sim, J_rand, mask)
 
+    def _create_ground_effect_fn(self):
+        """Create a ground effect function for the simulation pipeline.
+
+        Ground effect model: each rotor's thrust is multiplied by
+            k_ge = 1 / (1 - (R / (4 * z_eff))^2)
+        where z_eff is the rotor's height above the nearest surface (ground or
+        rover pad). The extra thrust per rotor is converted to an additive CoM
+        force and torque in the world frame.
+
+        The function captures a reference to self.rover_state so it always uses
+        the current rover position.
+        """
+        R = self.cfg.ground_effect_rotor_radius
+        ge_scale = self.cfg.ground_effect_scale
+        rover_height = self.cfg.rover_height
+        pad_radius = self.cfg.rover_platform_radius
+        gravity = self.cfg.gravity
+        # Motor site positions in body frame (X-config): (4, 3)
+        L = float(load_params("first_principles", self.cfg.drone_model)["L"])
+        motor_pos_body = jnp.array([
+            [L, -L, 0.0],   # motor0
+            [-L, -L, 0.0],  # motor1
+            [-L, L, 0.0],   # motor2
+            [L, L, 0.0],    # motor3
+        ])
+        # We need rpm2thrust to convert rotor_vel → per-motor thrust
+        rpm2thrust = jnp.array(load_params("first_principles", self.cfg.drone_model)["rpm2thrust"])
+        # Mixing matrix for torque: (3, 4) maps per-motor thrust to body torques
+        # We use motor_pos_body cross body_z to get torque arms
+        env_ref = self  # capture reference for rover state access
+
+        def ground_effect_fn(data: SimData) -> SimData:
+            states = data.states
+            pos = states.pos           # (N, 1, 3)
+            quat = states.quat         # (N, 1, 4) xyzw
+            rotor_vel = states.rotor_vel  # (N, 1, 4) RPM
+
+            # Per-motor thrust from RPM: T = a*rpm^2 + b*rpm + c
+            rpm = rotor_vel[:, 0, :]  # (N, 4)
+            per_motor_thrust = rpm2thrust[2] * rpm ** 2 + rpm2thrust[1] * rpm + rpm2thrust[0]  # (N, 4)
+            per_motor_thrust = jnp.maximum(per_motor_thrust, 0.0)
+
+            # Rotation matrix from body to world (from quat xyzw)
+            # Using the same quat convention as Crazyflow
+            x, y, z, w = quat[:, 0, 0], quat[:, 0, 1], quat[:, 0, 2], quat[:, 0, 3]
+            R_00 = 1 - 2*(y*y + z*z); R_01 = 2*(x*y - z*w); R_02 = 2*(x*z + y*w)
+            R_10 = 2*(x*y + z*w); R_11 = 1 - 2*(x*x + z*z); R_12 = 2*(y*z - x*w)
+            R_20 = 2*(x*z - y*w); R_21 = 2*(y*z + x*w); R_22 = 1 - 2*(x*x + y*y)
+            # R: (N, 3, 3)
+            rot = jnp.stack([
+                jnp.stack([R_00, R_01, R_02], axis=-1),
+                jnp.stack([R_10, R_11, R_12], axis=-1),
+                jnp.stack([R_20, R_21, R_22], axis=-1),
+            ], axis=-2)
+
+            # Motor world positions: (N, 4, 3)
+            drone_pos = pos[:, 0, :]  # (N, 3)
+            motor_world = drone_pos[:, None, :] + jnp.einsum('nij,kj->nki', rot, motor_pos_body)
+
+            # Get rover XY — use the captured env reference
+            rover_xy = jnp.array(env_ref.rover_state[:, :2])  # (N, 2)
+
+            # Per-motor effective height above nearest surface
+            motor_xy = motor_world[:, :, :2]  # (N, 4, 2)
+            motor_z = motor_world[:, :, 2]    # (N, 4)
+
+            # Check if each motor is over the pad
+            motor_dist_to_rover = jnp.linalg.norm(
+                motor_xy - rover_xy[:, None, :], axis=-1
+            )  # (N, 4)
+            over_pad = motor_dist_to_rover < pad_radius
+
+            # Effective height: over pad → z - rover_height, otherwise → z (above ground)
+            z_eff = jnp.where(over_pad, motor_z - rover_height, motor_z)
+            z_eff = jnp.maximum(z_eff, 0.01)  # clamp to avoid div by zero
+
+            # Ground effect multiplier per motor
+            ratio = R / (4.0 * z_eff)
+            ratio = jnp.minimum(ratio, 0.9)  # clamp to prevent singularity
+            k_ge = 1.0 / (1.0 - ratio ** 2)
+
+            # Extra thrust per motor (in body z direction)
+            extra_thrust = per_motor_thrust * (k_ge - 1.0) * ge_scale  # (N, 4)
+
+            # Convert to world-frame force: extra thrust along body z-axis
+            body_z_world = rot[:, :, 2]  # (N, 3) — body z in world frame
+            net_extra_force = jnp.sum(extra_thrust, axis=-1, keepdims=True) * body_z_world  # (N, 3)
+
+            # Convert to torque: cross product of motor arm × extra force (in body frame)
+            # Torque per motor in body frame = r_motor × (0, 0, extra_T)
+            # = (r_y * extra_T, -r_x * extra_T, 0)
+            torque_body_x = jnp.sum(motor_pos_body[None, :, 1] * extra_thrust, axis=-1)  # (N,)
+            torque_body_y = jnp.sum(-motor_pos_body[None, :, 0] * extra_thrust, axis=-1)  # (N,)
+            torque_body_z = jnp.zeros_like(torque_body_x)
+            torque_body = jnp.stack([torque_body_x, torque_body_y, torque_body_z], axis=-1)  # (N, 3)
+
+            # Rotate body torque to world frame
+            net_extra_torque = jnp.einsum('nij,nj->ni', rot, torque_body)  # (N, 3)
+
+            # Add ground effect on top of existing forces (e.g. disturbance noise)
+            new_force = states.force + net_extra_force[:, None, :]   # (N, 1, 3)
+            new_torque = states.torque + net_extra_torque[:, None, :]  # (N, 1, 3)
+
+            states = states.replace(force=new_force, torque=new_torque)
+            return data.replace(states=states)
+
+        return ground_effect_fn
+
     def _create_disturbance_fn(self):
-        """Create a disturbance function for the simulation pipeline."""
+        """Create a disturbance function for the simulation pipeline.
+
+        Supports two modes:
+          - "gaussian": i.i.d. white noise each substep
+          - "ou": Ornstein-Uhlenbeck process — injects current OU state (updated
+                  externally in _update_ou_state per substep to avoid JAX JIT issues)
+        """
         force_std = self.cfg.disturbance_force_std
         torque_std = self.cfg.disturbance_torque_std
+        dist_type = self.cfg.disturbance_type
 
-        def disturbance_fn(data: SimData) -> SimData:
-            key = data.core.rng_key
-            key, force_key, torque_key = jax.random.split(key, 3)
-            states = data.states
-            disturbance_force = jax.random.normal(force_key, states.force.shape) * force_std
-            disturbance_torque = jax.random.normal(torque_key, states.torque.shape) * torque_std
-            states = states.replace(force=disturbance_force, torque=disturbance_torque)
-            core = data.core.replace(rng_key=key)
-            return data.replace(states=states, core=core)
+        if dist_type == "ou":
+            # OU disturbance: inject self._ou_force/torque (updated outside JIT)
+            def disturbance_fn(data: SimData) -> SimData:
+                states = data.states
+                states = states.replace(
+                    force=states.force + self._ou_force,
+                    torque=states.torque + self._ou_torque,
+                )
+                return data.replace(states=states)
+        else:
+            # Original Gaussian white noise
+            def disturbance_fn(data: SimData) -> SimData:
+                key = data.core.rng_key
+                key, force_key, torque_key = jax.random.split(key, 3)
+                states = data.states
+                disturbance_force = jax.random.normal(force_key, states.force.shape) * force_std
+                disturbance_torque = jax.random.normal(torque_key, states.torque.shape) * torque_std
+                states = states.replace(
+                    force=states.force + disturbance_force,
+                    torque=states.torque + disturbance_torque,
+                )
+                core = data.core.replace(rng_key=key)
+                return data.replace(states=states, core=core)
 
         return disturbance_fn
 
-    def _enable_disturbance(self):
-        """Enable disturbance injection in simulation pipeline."""
+    def _update_ou_state(self):
+        """Advance OU disturbance state by one control step. Called outside JIT."""
+        if self.cfg.disturbance_type != "ou" or not self._disturbance_enabled:
+            return
+        theta = self.cfg.disturbance_ou_theta
+        sim_dt = 1.0 / self.cfg.control_freq  # control step dt (not substep)
+        force_std = self.cfg.disturbance_force_std
+        torque_std = self.cfg.disturbance_torque_std
+
+        key = self.sim.data.core.rng_key
+        key, fk, tk = jax.random.split(key, 3)
+        self.sim.data = self.sim.data.replace(
+            core=self.sim.data.core.replace(rng_key=key))
+
+        noise_f = jax.random.normal(fk, self._ou_force.shape)
+        noise_t = jax.random.normal(tk, self._ou_torque.shape)
+        self._ou_force = (
+            self._ou_force
+            - theta * self._ou_force * sim_dt
+            + force_std * jnp.sqrt(sim_dt) * noise_f
+        )
+        self._ou_torque = (
+            self._ou_torque
+            - theta * self._ou_torque * sim_dt
+            + torque_std * jnp.sqrt(sim_dt) * noise_t
+        )
+
+    def _rebuild_step_pipeline(self):
+        """Rebuild the simulation pipeline with current disturbance/GE settings.
+
+        Pipeline order (injected between force_torque_ctrl and integration):
+          1. reset_external_forces — zeros states.force/torque (prevents accumulation)
+          2. disturbance_fn — adds random noise (if enabled)
+          3. ground_effect_fn — adds per-rotor GE force/torque (if enabled)
+        """
+        extra_fns = []
+        need_reset = self._disturbance_enabled or self._ge_fn is not None
+
+        if need_reset:
+            def reset_external_forces(data: SimData) -> SimData:
+                states = data.states
+                zeros = jnp.zeros_like(states.force)
+                return data.replace(states=states.replace(force=zeros, torque=zeros))
+            extra_fns.append(reset_external_forces)
+
         if self._disturbance_enabled:
-            self._disable_disturbance()
-        disturbance_fn = self._create_disturbance_fn()
+            extra_fns.append(self._create_disturbance_fn())
+
+        if self._ge_fn is not None:
+            extra_fns.append(self._ge_fn)
+
         self.sim.step_pipeline = (
-            self._base_step_pipeline[:2] + (disturbance_fn,) + self._base_step_pipeline[2:]
+            self._core_step_pipeline[:2] + tuple(extra_fns) + self._core_step_pipeline[2:]
         )
         self.sim.build_step_fn()
+
+    def _enable_disturbance(self):
+        """Enable disturbance injection in simulation pipeline."""
         self._disturbance_enabled = True
+        self._rebuild_step_pipeline()
 
     def _disable_disturbance(self):
         """Disable disturbance injection in simulation pipeline."""
         if not self._disturbance_enabled:
             return
-        self.sim.step_pipeline = self._base_step_pipeline
-        self.sim.build_step_fn()
         self._disturbance_enabled = False
+        self._rebuild_step_pipeline()
 
     def _define_spaces(self):
         """Define per-agent observation and action spaces."""
@@ -722,6 +1010,11 @@ class LandingEnv(gym.Env):
         self.last_drone_cmd = jnp.zeros((self.cfg.n_worlds, 4))
         self.last_rover_cmd = jnp.zeros((self.cfg.n_worlds, self.cfg.rover_nu))
 
+        # Reset OU disturbance state
+        N = self.cfg.n_worlds
+        self._ou_force = jnp.zeros((N, 1, 3))
+        self._ou_torque = jnp.zeros((N, 1, 3))
+
         self._spawn_agents()
         self._init_last_dist()
         self.clear_trajectory()
@@ -790,8 +1083,25 @@ class LandingEnv(gym.Env):
         # Initialize drone state
         all_vel = jnp.zeros((N, 1, 3))
         all_ang_vel = jnp.zeros((N, 1, 3))
-        identity_quat = jnp.array([0.0, 0.0, 0.0, 1.0])
-        all_quat = jnp.broadcast_to(identity_quat, (N, 1, 4))
+
+        # Random initial yaw: quaternion [0, 0, sin(ψ/2), cos(ψ/2)] (xyzw)
+        if self.cfg.drone_init_yaw_max > 0:
+            key, yaw_key = jax.random.split(key)
+            self.sim.data = self.sim.data.replace(core=self.sim.data.core.replace(rng_key=key))
+            yaw = jax.random.uniform(
+                yaw_key, shape=(N,),
+                minval=-self.cfg.drone_init_yaw_max,
+                maxval=self.cfg.drone_init_yaw_max,
+            )
+            half_yaw = yaw / 2.0
+            all_quat = jnp.stack([
+                jnp.zeros(N), jnp.zeros(N),
+                jnp.sin(half_yaw), jnp.cos(half_yaw),
+            ], axis=-1)[:, None, :]  # (N, 1, 4)
+        else:
+            identity_quat = jnp.array([0.0, 0.0, 0.0, 1.0])
+            all_quat = jnp.broadcast_to(identity_quat, (N, 1, 4))
+
         all_rotor_vel = jnp.full((N, 1, 4), self.hover_rpm)
         all_pos = drone_pos[:, None, :]  # (N, 1, 3)
 
@@ -824,6 +1134,10 @@ class LandingEnv(gym.Env):
         self.last_drone_cmd = jnp.where(mask_jnp[:, None], 0.0, self.last_drone_cmd)
         self.last_rover_cmd = jnp.where(mask_jnp[:, None], 0.0, self.last_rover_cmd)
 
+        # Reset OU disturbance state for done worlds
+        self._ou_force = jnp.where(mask_jnp[:, None, None], 0.0, self._ou_force)
+        self._ou_torque = jnp.where(mask_jnp[:, None, None], 0.0, self._ou_torque)
+
         # Re-spawn
         key = self.sim.data.core.rng_key
         key, spawn_key = jax.random.split(key)
@@ -837,8 +1151,29 @@ class LandingEnv(gym.Env):
         # Reset Crazyflow state for done worlds
         self.sim.reset(mask=mask_jnp)
         hover_rpm = jnp.full((N, 1, 4), self.hover_rpm)
+
+        # Random initial yaw for reset worlds
+        if self.cfg.drone_init_yaw_max > 0:
+            key, yaw_key = jax.random.split(key)
+            self.sim.data = self.sim.data.replace(core=self.sim.data.core.replace(rng_key=key))
+            yaw = jax.random.uniform(
+                yaw_key, shape=(N,),
+                minval=-self.cfg.drone_init_yaw_max,
+                maxval=self.cfg.drone_init_yaw_max,
+            )
+            half_yaw = yaw / 2.0
+            reset_quat = jnp.stack([
+                jnp.zeros(N), jnp.zeros(N),
+                jnp.sin(half_yaw), jnp.cos(half_yaw),
+            ], axis=-1)[:, None, :]  # (N, 1, 4)
+        else:
+            reset_quat = None
+
+        replace_kwargs = dict(pos=all_drone_pos[:, None, :], rotor_vel=hover_rpm)
+        if reset_quat is not None:
+            replace_kwargs["quat"] = reset_quat
         states = leaf_replace(
-            self.sim.data.states, mask=mask_jnp, pos=all_drone_pos[:, None, :], rotor_vel=hover_rpm
+            self.sim.data.states, mask=mask_jnp, **replace_kwargs
         )
         self.sim.data = self.sim.data.replace(states=states)
         self._apply_domain_randomization(mask=mask_jnp)
@@ -953,6 +1288,7 @@ class LandingEnv(gym.Env):
 
         # Step drone (Crazyflow)
         self.sim.attitude_control(self.drone_cmd[:, None, :])
+        self._update_ou_state()  # Advance OU disturbance (once per control step)
         self.sim.step(n_steps=self.cfg.sim_steps_per_control)
 
         # Extract drone state
@@ -971,14 +1307,19 @@ class LandingEnv(gym.Env):
         # Extract rover values (rover-type-agnostic)
         rv = self._extract_rover_values(self.rover_state)
 
-        # Check conditions
+        # Sync pad position to rover and check contact-based landing
+        self._sync_pad_to_rover()
+        pad_contact = self._check_pad_contact()  # (N,) bool
+
         landed, crashed = _jit_check_landing(
             drone_pos_jnp, drone_vel_jnp, drone_rpy,
             rv["xy"], rv["vel_xy"],
             self.cfg.rover_height,
-            self.cfg.rover_platform_radius, self.cfg.landing_z_tol,
+            self.cfg.rover_platform_radius, self.cfg.landing_zone_radius,
+            self.cfg.landing_z_tol,
             self.cfg.landing_vel_xy_tol, self.cfg.landing_vel_z_tol,
             self.cfg.landing_attitude_tol,
+            jnp.array(pad_contact),
         )
         oob = _jit_check_oob(
             drone_pos_jnp,
@@ -1016,8 +1357,11 @@ class LandingEnv(gym.Env):
             self.cfg.reward_rover_yawrate_coef,
             self.cfg.reward_rover_lateral_coef,
             self.cfg.reward_drone_velocity_coef,
+            self.cfg.reward_drone_xy_corridor_coef,
             self.cfg.max_drone_speed,
             self.cfg.reward_rover_boundary_coef,
+            self.cfg.reward_landing_precision_coef,
+            self.cfg.landing_zone_radius,
             self.cfg.map_half_x,
             self.cfg.map_half_y,
         )
@@ -1377,6 +1721,15 @@ class LandingEnv(gym.Env):
 
         self._render_model = spec.compile()
         self._render_data = mujoco.MjData(self._render_model)
+
+        # Patch rover landing pad visual to match config radius
+        pad_geom_name = "rover_pad_geom" if self._rover_type == "x3" else None
+        if pad_geom_name is not None:
+            pad_id = mujoco.mj_name2id(
+                self._render_model, mujoco.mjtObj.mjOBJ_GEOM, pad_geom_name
+            )
+            if pad_id >= 0:
+                self._render_model.geom_size[pad_id, 0] = self.cfg.rover_platform_radius
 
         # Cache rover free-joint qpos address
         rover_joint_id = mujoco.mj_name2id(

@@ -26,6 +26,7 @@ from leap_c.ocp.acados.parameters import AcadosParameter, AcadosParameterManager
 # State / control dimensions
 NX_EULER = 12  # [x, y, z, roll, pitch, yaw, vx, vy, vz, droll, dpitch, dyaw]
 NX_QUAT = 13   # [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
+NY_QUAT = 12   # Cost residual dim for quat: [pos(3), quat_err_xyz(3), vel(3), ang_vel(3)]
 NX = NX_EULER   # Default (backward compat)
 NU = 4          # [roll_cmd, pitch_cmd, yaw_cmd, thrust]
 
@@ -82,15 +83,16 @@ def create_drone_params_linear_ls(
     hover_thrust = (mass * gravity) / cmd_f_coef
 
     nx = NX_QUAT if state_type == "quat" else NX_EULER
+    ny = NY_QUAT if state_type == "quat" else NX_EULER  # cost residual dim
 
     state_end_stages = list(range(N_horizon + 1)) if param_interface == "stagewise" else []
     ctrl_end_stages = list(range(N_horizon)) if param_interface == "stagewise" else []
 
-    # Weight log-bounds per state component
+    # Weight log-bounds per cost residual component
     if state_type == "quat":
-        # [pos(3), quat(4), vel(3), ang_vel(3)] = 13D
-        w_state_min_log = np.array([-1., -1., -1., -2., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
-        w_state_max_log = np.array([2., 2., 2., 1., 1., 1., 1., 2., 2., 2., 1., 1., 1.])
+        # [pos(3), quat_err_xyz(3), vel(3), ang_vel(3)] = 12D
+        w_state_min_log = np.array([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
+        w_state_max_log = np.array([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.])
     else:
         # [pos(3), rpy(3), vel(3), drpy(3)] = 12D
         w_state_min_log = np.array([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.])
@@ -183,11 +185,12 @@ def get_drone_learnable_param_dim(
 ) -> int:
     """Total dimension of learnable parameters for the drone OCP."""
     nx = NX_QUAT if state_type == "quat" else NX_EULER
+    ny = NY_QUAT if state_type == "quat" else NX_EULER  # w_state dim
     if param_interface == "global":
-        return nx + NU + nx + NU
+        return ny + NU + nx + NU  # w_state(ny) + w_ctrl(NU) + yref_state(nx) + yref_ctrl(NU)
     n_state_stages = N_horizon + 1
     n_ctrl_stages = N_horizon
-    return (nx + nx) * n_state_stages + (NU + NU) * n_ctrl_stages
+    return (ny + nx) * n_state_stages + (NU + NU) * n_ctrl_stages
 
 
 # ---------------------------------------------------------------------------
@@ -290,16 +293,49 @@ def export_drone_ocp_linear_ls(
     yref_state = param_manager.get("yref_state")
     yref_control = param_manager.get("yref_control")
 
-    y = ca.vertcat(X, U)
-    y_ref = ca.vertcat(yref_state, yref_control)
-    W = ca.diag(ca.vertcat(w_state, w_control))
-    W_e = ca.diag(w_state)
+    if state_type == "quat":
+        # Quaternion error cost: residual uses error quaternion vector part (3D)
+        # instead of component-wise q - q_ref (4D)
+        # State: [pos(3), qx, qy, qz, qw, vel(3), ang_vel(3)]
+        pos = X[:3]
+        qx, qy, qz, qw = X[3], X[4], X[5], X[6]
+        vel = X[7:10]
+        ang_vel = X[10:13]
 
-    y_res = y - y_ref
-    y_res_e = X - yref_state
+        pos_ref = yref_state[:3]
+        qx_r, qy_r, qz_r, qw_r = yref_state[3], yref_state[4], yref_state[5], yref_state[6]
+        vel_ref = yref_state[7:10]
+        ang_vel_ref = yref_state[10:13]
 
-    ocp.model.cost_expr_ext_cost = 0.5 * (y_res.T @ W @ y_res)
-    ocp.model.cost_expr_ext_cost_e = 0.5 * (y_res_e.T @ W_e @ y_res_e)
+        # Error quaternion: conj(q_ref) ⊗ q — vector part is zero when aligned
+        # Naturally sign-invariant: both q and -q give zero vector part
+        q_err_x = qw_r * qx - qx_r * qw - qy_r * qz + qz_r * qy
+        q_err_y = qw_r * qy + qx_r * qz - qy_r * qw - qz_r * qx
+        q_err_z = qw_r * qz - qx_r * qy + qy_r * qx - qz_r * qw
+
+        # 12D state cost residual
+        state_res = ca.vertcat(pos - pos_ref, q_err_x, q_err_y, q_err_z,
+                               vel - vel_ref, ang_vel - ang_vel_ref)
+
+        ctrl_res = U - yref_control
+        y_res = ca.vertcat(state_res, ctrl_res)
+        W = ca.diag(ca.vertcat(w_state, w_control))
+        W_e = ca.diag(w_state)
+
+        ocp.model.cost_expr_ext_cost = 0.5 * (y_res.T @ W @ y_res)
+        ocp.model.cost_expr_ext_cost_e = 0.5 * (state_res.T @ W_e @ state_res)
+    else:
+        # Euler: simple component-wise residual
+        y = ca.vertcat(X, U)
+        y_ref = ca.vertcat(yref_state, yref_control)
+        W = ca.diag(ca.vertcat(w_state, w_control))
+        W_e = ca.diag(w_state)
+
+        y_res = y - y_ref
+        y_res_e = X - yref_state
+
+        ocp.model.cost_expr_ext_cost = 0.5 * (y_res.T @ W @ y_res)
+        ocp.model.cost_expr_ext_cost_e = 0.5 * (y_res_e.T @ W_e @ y_res_e)
 
     # Initial state constraint
     if state_type == "quat":

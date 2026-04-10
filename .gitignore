@@ -8,11 +8,15 @@ build/
 
 # Virtual environments
 local_env/
+local_env_hardware/
 
 # IDE / tools
 .vscode/
 .idea/
 .claude/
+
+# External (submodules managed separately)
+external/
 
 # OS
 .DS_Store
@@ -20,6 +24,22 @@ local_env/
 # Secrets
 .env
 
-# Training artifacts (keep config, ignore large outputs)
-results/acmpc/*/results/
+# Training results (keep config.yaml, ignore runs/checkpoints/logs)
+results/*/results/
+results/*/*/results/
 *.pt
+*.pth
+*.tfevents.*
+*.tfevents.*.bak
+
+# Hardware build artifacts
+hardware/ros2_ws/build/
+hardware/ros2_ws/install/
+hardware/ros2_ws/log/
+hardware/ros2_ws/src/crazyswarm2/
+hardware/ros2_ws/src/yahboomcar_description/
+hardware/local_env_hardware/
+
+# Misc
+log*.csv
+params*.csv

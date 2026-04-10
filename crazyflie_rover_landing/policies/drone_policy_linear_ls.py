@@ -20,6 +20,7 @@ from crazyflie_rover_landing.leap_c.drone_planner import DronePlanner, DronePlan
 from crazyflie_rover_landing.leap_c.drone_ocp_linear_ls import (
     NX_EULER,
     NX_QUAT,
+    NY_QUAT,
     NU,
     StateType,
 )
@@ -88,6 +89,7 @@ class DroneMPCLayerLinearLS(nn.Module):
         self.mpc_horizon = mpc_horizon
         self.state_type = state_type
         self.nx = NX_QUAT if state_type == "quat" else NX_EULER
+        self.ny = NY_QUAT if state_type == "quat" else NX_EULER  # cost residual dim for w_state
 
         planner_cfg = DronePlannerConfig(
             N_horizon=mpc_horizon,
@@ -124,8 +126,9 @@ class DroneMPCLayerLinearLS(nn.Module):
 
         # Weight log-scale bounds (state-type dependent)
         if state_type == "quat":
-            self.register_buffer("w_state_min_log", torch.tensor([-1., -1., -1., -2., -2., -2., -2., -1., -1., -1., -1., -1., -1.]))
-            self.register_buffer("w_state_max_log", torch.tensor([2., 2., 2., 1., 1., 1., 1., 2., 2., 2., 1., 1., 1.]))
+            # 12D: [pos(3), quat_err_xyz(3), vel(3), ang_vel(3)]
+            self.register_buffer("w_state_min_log", torch.tensor([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.]))
+            self.register_buffer("w_state_max_log", torch.tensor([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.]))
         else:
             self.register_buffer("w_state_min_log", torch.tensor([-1., -1., -1., -2., -2., -2., -1., -1., -1., -1., -1., -1.]))
             self.register_buffer("w_state_max_log", torch.tensor([2., 2., 2., 1., 1., 1., 2., 2., 2., 1., 1., 1.]))
@@ -174,11 +177,12 @@ class DroneMPCLayerLinearLS(nn.Module):
         self, net_out: torch.Tensor, batch_size: int, state: torch.Tensor
     ) -> torch.Tensor:
         """Scale [0,1] network output to MPC parameters (global interface)."""
-        nx = self.nx
-        w_state_raw = net_out[:, :nx]
-        w_ctrl_raw = net_out[:, nx:nx + NU]
-        yref_state_raw = net_out[:, nx + NU:nx + NU + nx]
-        yref_ctrl_raw = net_out[:, nx + NU + nx:nx + NU + nx + NU]
+        ny = self.ny  # cost residual dim (w_state size)
+        nx = self.nx  # state dim (yref_state size)
+        w_state_raw = net_out[:, :ny]
+        w_ctrl_raw = net_out[:, ny:ny + NU]
+        yref_state_raw = net_out[:, ny + NU:ny + NU + nx]
+        yref_ctrl_raw = net_out[:, ny + NU + nx:ny + NU + nx + NU]
 
         # Log-scale weights
         log_w_state = self.w_state_min_log + w_state_raw * (self.w_state_max_log - self.w_state_min_log)

@@ -17,6 +17,7 @@ environment:
   landing_vel_xy_tol: 0.1     # m/s — relative to rover pad
   landing_vel_z_tol: 0.2      # m/s — max descent speed (upward rejected)
   landing_attitude_tol: 0.05  # rad (~3°) — must be nearly level
+  drone_init_yaw_max: 0.1745  # rad (~10°) — random initial yaw at spawn
   randomize_mass: false
   randomize_inertia: false
   mass_randomization_std: 0.003       # [kg]
@@ -46,6 +47,7 @@ rewards:
   rover_stillness_coef: 0.5    # penalty for rover speed when drone is in landing corridor
   rover_yawrate_coef: 0.5      # penalty for rover yaw rate when drone is in landing corridor
   drone_velocity_coef: 0.5      # penalty for drone speed above max_drone_speed
+  drone_xy_corridor_coef: 5.0  # penalty for drone XY speed in landing corridor (hover-then-descend)
   rover_boundary_coef: 1.0    # per-step penalty for rover at arena boundary
 
 policy:

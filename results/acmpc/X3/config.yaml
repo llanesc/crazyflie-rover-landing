@@ -1,6 +1,6 @@
 environment:
   rover_type: "x3"
-  drone_model: "cf21B_500"
+  drone_model: "cf2x_T350"
   dynamics: "first_principles"
   sim_freq: 500
   mellinger_freq: 500
@@ -15,20 +15,28 @@ environment:
   rover_vy_max: 1.0            # m/s   (ROS /cmd_vel lateral limit)
   rover_wz_max: 5.0            # rad/s (ROS /cmd_vel yaw rate limit)
   rover_wheel_vel_max: 34.9    # rad/s (333 RPM motor with 1:30 gear ratio)
-  rover_platform_radius: 0.15  # m — X3 is larger than Burger
-  rover_height: 0.1185         # height of landing pad surface above ground [m] (base_z + pad_z + pad_half_h)
+  rover_platform_radius: 0.127  # m — 254mm square pad (inscribed circle radius)
+  landing_zone_radius: 0.05   # m — safe landing zone (edge landings = crash)
+  rover_height: 0.213          # height of landing pad surface above ground [m] (custom 3D printed pad on bracket)
   landing_z_tol: 0.05          # m — must be very close to pad surface
   landing_vel_xy_tol: 0.1     # m/s — relative to rover pad
-  landing_vel_z_tol: 0.2      # m/s — max descent speed (upward rejected)
+  landing_vel_z_tol: 0.1      # m/s — max descent speed (upward rejected)
   landing_attitude_tol: 0.05  # rad (~3°) — must be nearly level
+  drone_init_yaw_max: 0.1745  # rad (~10°) — random initial yaw at spawn
+  # Ground effect (per-rotor, surface-aware)
+  enable_ground_effect: true
+  ground_effect_rotor_radius: 0.0275  # m — 55mm prop diameter / 2
+  ground_effect_scale: 1.5            # overestimate for sim-to-real robustness
   # domain randomization parameters (applied only in "domain_rand" curriculum level)
   randomize_mass: false
   randomize_inertia: false
   mass_randomization_std: 0.003       # [kg]
   inertia_randomization_std: 3.0e-6   # [kg*m^2]
   enable_disturbance: false
+  disturbance_type: "ou"              # "gaussian" (white noise) or "ou" (Ornstein-Uhlenbeck)
   disturbance_force_std: 0.01         # [N]
   disturbance_torque_std: 1.0e-4      # [Nm]
+  disturbance_ou_theta: 0.5           # OU mean-reversion rate [1/s] (lower = smoother)
   # Landing corridor
   corridor_radius: 0.3       # m — horizontal distance to activate landing phase
   corridor_transition: 0.1   # m — sigmoid blend width
@@ -48,6 +56,7 @@ rewards:
   action_smoothness_vy: 0.03      # x3: lateral velocity smoothness
   action_smoothness_wz: 0.001     # x3: yaw rate smoothness
   landing_velocity_coef: 2.0
+  landing_precision_coef: 10.0  # bonus for landing near pad center (1.0 at center, 0.0 at edge)
   descent_speed_coef: 2.0       # penalty for exceeding max descent speed in corridor
   altitude_floor_coef: 0.3      # penalty for being below altitude floor during navigation
   time_penalty: 0.0             # per-step cost to discourage hovering
@@ -55,6 +64,7 @@ rewards:
   rover_yawrate_coef: 0.5      # penalty for rover yaw rate when drone is in landing corridor
   rover_lateral_coef: 0.2     # soft penalty on body-frame lateral speed (camera faces forward)
   drone_velocity_coef: 2.0      # penalty for drone speed above max_drone_speed
+  drone_xy_corridor_coef: 5.0  # penalty for drone XY speed in landing corridor (hover-then-descend)
   rover_boundary_coef: 1.0    # per-step penalty for rover at arena boundary
 
 policy:
@@ -76,7 +86,7 @@ policy:
     mpc_dt: 0.02
     cost_net_sizes: [256, 256]
     pos_offset_max: 0.25
-    initial_log_std: [-0.5, -0.5, -0.5]  # vx, vy, ωz
+    initial_log_std: [-0.6, -0.6, -0.6]  # vx, vy, ωz
 
 training:
   timesteps: 2_000_000
@@ -116,6 +126,7 @@ curriculum:
   allow_regression: true
   levels:
     - name: "close_hover"
+      landing_zone_radius: 0.10    # generous zone to learn landing
       drone_spawn:
         z_min: 0.5
         z_max: 1.0
@@ -127,6 +138,7 @@ curriculum:
         y_half: 0.3
 
     - name: "nearby_approach"
+      landing_zone_radius: 0.09
       drone_spawn:
         z_min: 0.5
         z_max: 1.5
@@ -139,6 +151,7 @@ curriculum:
         y_half: 0.5
 
     - name: "medium_rover"
+      landing_zone_radius: 0.08
       drone_spawn:
         z_min: 0.5
         z_max: 1.5
@@ -151,6 +164,7 @@ curriculum:
         y_half: 0.5
 
     - name: "fast_rover"
+      landing_zone_radius: 0.07
       drone_spawn:
         z_min: 0.5
         z_max: 1.5
@@ -165,8 +179,12 @@ curriculum:
       randomize_inertia: true
       mass_randomization_std: 0.002       # [kg]
       inertia_randomization_std: 1.0e-6   # [kg*m^2]
-
+      enable_disturbance: true
+      disturbance_force_std: 5.0e-3  # Standard deviation for force disturbance [N]
+      disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]
+  
     - name: "domain_rand"
+      landing_zone_radius: 0.06
       drone_spawn:
         z_min: 0.5
         z_max: 1.5
@@ -177,13 +195,17 @@ curriculum:
         max_speed: 0.9   # m/s
         x_half: 1.0
         y_half: 1.0
+      landing_vel_z_tol: 0.05
       randomize_mass: true
       randomize_inertia: true
       mass_randomization_std: 0.002       # [kg]
       inertia_randomization_std: 1.0e-6   # [kg*m^2]
-      enable_disturbance: false
+      enable_disturbance: true
+      disturbance_force_std: 5.0e-3  # Standard deviation for force disturbance [N]
+      disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]
 
     - name: "full_map"
+      landing_zone_radius: 0.05    # final target: tight center landing
       drone_spawn:
         z_min: 0.5
         z_max: 2.0
@@ -194,9 +216,11 @@ curriculum:
         max_speed: 1.0   # m/s  (full /cmd_vel vx limit)
         x_half: 2.0
         y_half: 2.0
-      landing_vel_z_tol: 0.2      # m/s — max descent speed (upward rejected)
+      landing_vel_z_tol: 0.05      # m/s — tighter descent speed for final level
       randomize_mass: true
       randomize_inertia: true
-      mass_randomization_std: 0.002       # [kg]
+      mass_randomization_std: 0.005       # [kg]
       inertia_randomization_std: 1.0e-6   # [kg*m^2]
-      enable_disturbance: false
+      enable_disturbance: true
+      disturbance_force_std: 5.0e-3  # Standard deviation for force disturbance [N]
+      disturbance_torque_std: 5.0e-5  # Standard deviation for torque disturbance [Nm]

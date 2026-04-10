@@ -1,0 +1,58 @@
+# Cooperative Drone-Rover Landing Configuration
+
+# Scenario selection (overridden by launch file args)
+drone_mode: sim          # sim | hw
+rover_mode: sim          # sim | hw
+
+# Policy type
+policy_type: mlp         # acmpc | mlp
+stochastic_policy: false # if true, sample from distribution instead of using mean
+
+# Agent names
+drone_name: cf_1
+
+# Topic names (same for sim and hw)
+rover_odom_topic: /x3/odom
+rover_vel_topic: /x3/vel_raw
+rover_cmd_topic: /x3/cmd_vel
+
+# Use TF lookup for rover global position (true for hw with AMCL, false for sim)
+use_tf_for_rover: false
+
+# DDS
+ros_domain_id: 28
+
+# Path to training config.yaml (results/acmpc/X3/config.yaml)
+# If not set, looks for config.yaml in models/acmpc/
+# training_config_path: /home/llanesc/crazyflie-rover-landing/results/acmpc/X3/config.yaml
+
+# Scenario initial conditions
+active_scenario: default
+scenarios:
+  default:
+    drone_initial_pos: [0.0, 0.0, 1.0]
+    rover_initial_pos: [1.5, 0.0]
+    rover_initial_heading: 0.0
+
+# State machine thresholds
+takeoff_altitude: 1.0       # m — target hover altitude
+takeoff_duration: 3.0       # s
+altitude_threshold: 0.20    # m — tolerance for takeoff complete
+velocity_threshold: 0.05    # m/s — velocity below which hover is stable
+
+# Landing detection
+rover_height: 0.213         # m — pad surface above ground (custom 3D printed pad)
+rover_platform_radius: 0.127 # m — 254mm square pad inscribed circle
+landing_zone_radius: 0.05   # m — safe landing zone
+landing_z_tol: 0.05         # m — altitude tolerance above pad
+landing_vel_xy_tol: 0.1     # m/s — max horizontal speed
+landing_vel_z_tol: 0.1      # m/s — max descent speed
+landing_attitude_tol: 0.05  # rad — max roll/pitch (~3°)
+
+# Boundaries
+map_size_x: 15.0
+map_size_y: 15.0
+drone_z_max: 3.0
+
+# Status publisher
+status_frequency: 10        # Hz

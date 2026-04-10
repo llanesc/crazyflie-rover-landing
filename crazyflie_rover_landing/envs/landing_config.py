@@ -82,14 +82,22 @@ class LandingEnvConfig:
     mass_randomization_std: float = 2e-3
     inertia_randomization_std: float = 3e-6
 
+    # Ground effect
+    enable_ground_effect: bool = False
+    ground_effect_rotor_radius: float = 0.0275  # Prop radius [m] (55mm diameter / 2)
+    ground_effect_scale: float = 1.0            # Multiplier for GE force (>1 overestimates for robustness)
+
     # Disturbance forces/torques
     enable_disturbance: bool = False
+    disturbance_type: str = "gaussian"  # "gaussian" (white noise) or "ou" (Ornstein-Uhlenbeck)
     disturbance_force_std: float = 0.01
     disturbance_torque_std: float = 1e-4
+    disturbance_ou_theta: float = 2.0   # OU mean-reversion rate [1/s] (lower = smoother)
 
     # Rover physical limits — burger (differential-drive)
     rover_wheel_vel_max: float = 6.67   # rad/s  (MuJoCo ctrlrange for burger, motor limit for x3)
     rover_platform_radius: float = 0.10  # Landing pad radius [m]
+    landing_zone_radius: float = 0.07    # Safe landing zone radius [m] (smaller than pad — edge landings crash)
     rover_height: float = 0.152          # Height of landing pad surface above ground [m]
 
     # Rover physical limits — x3 (mecanum) body velocity commands
@@ -113,6 +121,9 @@ class LandingEnvConfig:
     roll_pitch_max: float = 0.5
     yaw_max: float = 0.5
 
+    # Initial yaw randomization at spawn [rad] (uniform ±drone_init_yaw_max)
+    drone_init_yaw_max: float = 0.0
+
     # ---- Reward weights ----
     reward_landing: float = 100.0
     reward_crash: float = -20.0
@@ -127,6 +138,7 @@ class LandingEnvConfig:
     reward_action_smoothness_vy: float = 0.03
     reward_action_smoothness_wz: float = 0.001
     reward_landing_velocity_coef: float = 2.0
+    reward_landing_precision_coef: float = 10.0  # Bonus for landing near pad center (scales linearly)
     reward_descent_speed_coef: float = 5.0    # Penalty for exceeding max descent speed in corridor
     reward_altitude_floor_coef: float = 0.5   # Penalty for being below altitude floor during navigation
     reward_time_penalty: float = 0.0          # Per-step cost to discourage hovering
@@ -134,6 +146,7 @@ class LandingEnvConfig:
     reward_rover_yawrate_coef: float = 0.5  # Penalty for rover yaw rate when drone is in landing corridor
     reward_rover_lateral_coef: float = 0.0  # Penalty for rover body-frame lateral speed (vy²)
     reward_drone_velocity_coef: float = 0.1  # Penalty for drone speed above max_drone_speed
+    reward_drone_xy_corridor_coef: float = 0.0  # Penalty for drone XY speed inside landing corridor
     reward_rover_boundary_coef: float = 1.0  # Per-step penalty for rover at arena boundary
 
     # Landing corridor

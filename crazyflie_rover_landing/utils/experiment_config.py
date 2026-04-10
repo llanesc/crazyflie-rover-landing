@@ -59,6 +59,19 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
     if "dynamics" in env_cfg:
         kwargs["dynamics"] = env_cfg["dynamics"]
 
+    # Drone control limits and state type (from policy.drone section)
+    drone_cfg = config.get("policy", {}).get("drone", {})
+    if "state_type" in drone_cfg:
+        kwargs["drone_state_type"] = drone_cfg["state_type"]
+    if "roll_pitch_max" in drone_cfg:
+        kwargs["roll_pitch_max"] = drone_cfg["roll_pitch_max"]
+    if "yaw_max" in drone_cfg:
+        kwargs["yaw_max"] = drone_cfg["yaw_max"]
+
+    # Drone initial yaw randomization
+    if "drone_init_yaw_max" in env_cfg:
+        kwargs["drone_init_yaw_max"] = env_cfg["drone_init_yaw_max"]
+
     # Simulation frequencies
     for key in ("sim_freq", "mellinger_freq", "control_freq", "episode_length_s"):
         if key in env_cfg:
@@ -70,7 +83,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
             kwargs[key] = env_cfg[key]
 
     # Rover params (common + type-specific)
-    for key in ("rover_wheel_vel_max", "rover_platform_radius", "rover_height",
+    for key in ("rover_wheel_vel_max", "rover_platform_radius", "landing_zone_radius", "rover_height",
                 "rover_vx_max", "rover_vy_max", "rover_wz_max"):
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
@@ -85,10 +98,16 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
     if "mass" in env_cfg and env_cfg["mass"] is not None:
         kwargs["mass"] = env_cfg["mass"]
 
+    # Ground effect
+    for key in ("enable_ground_effect", "ground_effect_rotor_radius", "ground_effect_scale"):
+        if key in env_cfg:
+            kwargs[key] = env_cfg[key]
+
     # Domain randomization
     for key in ("randomize_mass", "randomize_inertia",
                 "mass_randomization_std", "inertia_randomization_std",
-                "enable_disturbance", "disturbance_force_std", "disturbance_torque_std"):
+                "enable_disturbance", "disturbance_force_std", "disturbance_torque_std",
+                "disturbance_type", "disturbance_ou_theta"):
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
 
@@ -106,6 +125,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
         "action_smoothness_vy": "reward_action_smoothness_vy",
         "action_smoothness_wz": "reward_action_smoothness_wz",
         "landing_velocity_coef": "reward_landing_velocity_coef",
+        "landing_precision_coef": "reward_landing_precision_coef",
         "descent_speed_coef": "reward_descent_speed_coef",
         "altitude_floor_coef": "reward_altitude_floor_coef",
         "time_penalty": "reward_time_penalty",
@@ -113,6 +133,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
         "rover_yawrate_coef": "reward_rover_yawrate_coef",
         "rover_lateral_coef": "reward_rover_lateral_coef",
         "drone_velocity_coef": "reward_drone_velocity_coef",
+        "drone_xy_corridor_coef": "reward_drone_xy_corridor_coef",
         "rover_boundary_coef": "reward_rover_boundary_coef",
     }
     for yaml_key, cfg_key in reward_mapping.items():

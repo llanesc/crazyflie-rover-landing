@@ -1,0 +1,8 @@
+uint8 STATUS_OFF = 0
+uint8 STATUS_TAKEOFF = 1
+uint8 STATUS_HOVER = 2
+uint8 STATUS_RUN = 3
+uint8 STATUS_LANDED = 4
+uint8 STATUS_ABORT = 5
+
+uint8 status

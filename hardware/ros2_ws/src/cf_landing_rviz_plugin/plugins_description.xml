@@ -1,0 +1,11 @@
+<library path="cf_landing_rviz_plugin">
+  <class name="cf_landing_rviz_plugin/LandingPanel"
+         type="cf_landing_rviz_plugin::LandingPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Control panel for cooperative drone-rover landing.
+      Displays drone and rover status, provides Takeoff/Run/Abort commands,
+      and supports rosbag recording.
+    </description>
+  </class>
+</library>

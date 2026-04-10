@@ -453,6 +453,8 @@ def main():
         "landing_vel_xy_tol": env_cfg.landing_vel_xy_tol,
         "landing_vel_z_tol": env_cfg.landing_vel_z_tol,
         "landing_attitude_tol": env_cfg.landing_attitude_tol,
+        "disturbance_type": env_cfg.disturbance_type,
+        "disturbance_ou_theta": env_cfg.disturbance_ou_theta,
         "drone_obs_dim": raw_env.drone_obs_dim,
         "rover_obs_dim": raw_env.rover_obs_dim,
         "shared_state_dim": raw_env.shared_state_dim,

@@ -78,6 +78,12 @@ def parse_args():
     parser.add_argument("--cam-lookat", type=float, nargs=3, default=None,
                         metavar=("X", "Y", "Z"),
                         help="Camera lookat point (3 floats)")
+    parser.add_argument("--drone-pos", type=str, default=None,
+                        help="Fixed drone initial position x,y (e.g. '2.0,0.5')")
+    parser.add_argument("--rover-pos", type=str, default=None,
+                        help="Fixed rover initial position x,y (e.g. '0,0')")
+    parser.add_argument("--log-csv", type=str, default=None,
+                        help="Save per-step obs/action data to CSV file")
     return parser.parse_args()
 
 
@@ -213,6 +219,28 @@ def main():
             spawn_cfg = config.get("environment", {}).get("spawn", {})
         spawn_cfg.setdefault("rover", {})["stationary"] = True
         spawn_fn = create_spawn_fn_from_config(spawn_cfg)
+
+    # Override spawn with fixed initial positions if specified
+    if args.drone_pos is not None or args.rover_pos is not None:
+        drone_xy = [float(x) for x in args.drone_pos.split(',')] if args.drone_pos else [0, 0]
+        rover_xy = [float(x) for x in args.rover_pos.split(',')] if args.rover_pos else [0, 0]
+        rover_nx = env_cfg.rover_nx
+        env_cfg.drone_init_yaw_max = 0.0  # No random yaw for fixed spawn
+        def fixed_spawn_fn(key, N):
+            import jax.numpy as jnp
+            # Drone position: (N, 3)
+            drone_pos = jnp.zeros((N, 3))
+            drone_pos = drone_pos.at[:, 0].set(drone_xy[0])
+            drone_pos = drone_pos.at[:, 1].set(drone_xy[1])
+            drone_pos = drone_pos.at[:, 2].set(1.0)
+            # Rover state: (N, rover_nx) — [x, y, cos(theta), sin(theta), ...]
+            rover_state = jnp.zeros((N, rover_nx))
+            rover_state = rover_state.at[:, 0].set(rover_xy[0])
+            rover_state = rover_state.at[:, 1].set(rover_xy[1])
+            rover_state = rover_state.at[:, 2].set(1.0)  # cos(0)
+            return drone_pos, rover_state
+        spawn_fn = fixed_spawn_fn
+        print(f"Fixed spawn: drone=({drone_xy[0]}, {drone_xy[1]}, 1.0) rover=({rover_xy[0]}, {rover_xy[1]})")
 
     # Override n_worlds if specified
     if args.n_worlds is not None:
@@ -393,6 +421,23 @@ def main():
         print("Checkpoint loaded successfully (stochastic mode)")
 
     # -----------------------------------------------------------------------
+    # CSV logging setup
+    # -----------------------------------------------------------------------
+    csv_file = None
+    csv_writer = None
+    if args.log_csv:
+        import csv
+        csv_file = open(args.log_csv, 'w', newline='')
+        csv_writer = csv.writer(csv_file)
+        # Header: step, drone obs (29), drone action (4), rover obs, rover action
+        drone_obs_cols = [f'drone_obs_{i}' for i in range(raw_env.drone_obs_dim)]
+        drone_act_cols = ['drone_roll', 'drone_pitch', 'drone_yaw', 'drone_thrust']
+        rover_obs_cols = [f'rover_obs_{i}' for i in range(raw_env.rover_obs_dim)]
+        rover_act_cols = ['rover_vx', 'rover_vy', 'rover_wz']
+        csv_writer.writerow(['step', 'time'] + drone_obs_cols + drone_act_cols + rover_obs_cols + rover_act_cols)
+        print(f"Logging to CSV: {args.log_csv}")
+
+    # -----------------------------------------------------------------------
     # Evaluation loop
     # -----------------------------------------------------------------------
     n_episodes = args.n_episodes
@@ -411,12 +456,24 @@ def main():
     print(f"Evaluating {n_episodes} episodes across {n_worlds} worlds...")
 
     while episodes_done < n_episodes:
+        # Log obs BEFORE action (what the policy sees)
+        if csv_writer is not None and episodes_done == 0:
+            drone_obs_pre = obs["drone"][0].cpu().numpy().tolist()
+            rover_obs_pre = obs["rover"][0].cpu().numpy().tolist()
+
         # Get actions (deterministic: use mean of distribution)
         states = {a: infos.get("state", {}).get(a) for a in possible_agents}
         with torch.no_grad():
             actions, _ = agent.act(obs, states, timestep=10**9, timesteps=10**9)
 
         obs, rewards, terminated, truncated, infos = env_skrl.step(actions)
+
+        # Log to CSV: obs before action + action applied
+        if csv_writer is not None and episodes_done == 0:
+            drone_act = raw_env.drone_cmd[0].tolist() if hasattr(raw_env, 'drone_cmd') else actions["drone"][0].cpu().numpy().tolist()
+            rover_act = raw_env.last_rover_cmd[0].tolist() if hasattr(raw_env, 'last_rover_cmd') else actions["rover"][0].cpu().numpy().tolist()
+            t = step / env_cfg.control_freq
+            csv_writer.writerow([step, f'{t:.4f}'] + drone_obs_pre + drone_act + rover_obs_pre + rover_act)
 
         # Count events from raw env
         term_events = raw_env.last_termination_events
@@ -500,6 +557,10 @@ def main():
         print(f"Video saved to: {video_path}")
 
     env_skrl.close()
+
+    if csv_file is not None:
+        csv_file.close()
+        print(f"CSV data saved to: {args.log_csv}")
 
 
 if __name__ == "__main__":

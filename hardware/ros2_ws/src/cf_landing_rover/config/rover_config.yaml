@@ -1,0 +1,17 @@
+# Rover-side configuration for X3 Docker deployment
+
+drone_name: cf_1
+ros_domain_id: 28
+
+# Localization mode: sim | lidar | mocap
+localization_mode: mocap
+
+# Mocap settings (used when localization_mode: mocap)
+mocap_pose_topic: /rover/mocap_pose
+
+# Lidar/AMCL settings (used when localization_mode: lidar)
+# map_file: maps/arena.yaml
+# amcl_params_file: config/amcl_params.yaml
+
+# Path to training config.yaml — if not set, uses models/acmpc/config.yaml
+# training_config_path: /path/to/results/acmpc/X3/config.yaml

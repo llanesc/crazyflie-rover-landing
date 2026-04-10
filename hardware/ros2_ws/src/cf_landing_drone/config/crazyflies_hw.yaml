@@ -1,0 +1,55 @@
+fileversion: 3
+
+robots:
+  cf_1:
+    enabled: true
+    uri: radio://0/50/2M/E7E7E7E7E0  # UPDATE with your drone's URI
+    initial_position: [0.0, 0.0, 0.0]
+    type: cf_hw
+
+robot_types:
+  cf_hw:
+    motion_capture:
+      tracking: "librigidbodytracker"
+      marker: default_single_marker
+      dynamics: default
+    big_quad: false
+    firmware_logging:
+      enabled: true
+      default_topics:
+        odom:
+          frequency: 50
+      custom_topics:
+        body_rates:
+          frequency: 50
+          vars: ["stateEstimateZ.rateRoll", "stateEstimateZ.ratePitch", "stateEstimateZ.rateYaw"]
+    firmware_params:
+      ring:
+        effect: 7
+        solidBlue: 0
+        solidGreen: 255
+        solidRed: 0
+        headlightEnable: 0
+      kalman:
+        resetEstimation: 1
+
+all:
+  firmware_logging:
+    enabled: true
+  firmware_params:
+    commander:
+      enHighLevel: 1
+    stabilizer:
+      estimator: 2  # kalman
+      controller: 2  # mellinger
+    flightmode:
+      stabModeRoll: 1
+      stabModePitch: 1
+      stabModeYaw: 0
+    locSrv:
+      extPosStdDev: 1e-3
+      extQuatStdDev: 0.5e-1
+  reference_frame: "world"
+  broadcasts:
+    num_repeats: 15
+    delay_between_repeats_ms: 1
