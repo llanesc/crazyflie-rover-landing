@@ -136,7 +136,8 @@ class LandingEnvConfig:
     reward_landing_velocity_coef: float = 2.0
     reward_landing_precision_coef: float = 10.0  # Bonus for landing near pad center (scales linearly)
     reward_descent_speed_coef: float = 5.0    # Penalty for exceeding max descent speed in corridor
-    reward_altitude_floor_coef: float = 0.5   # Penalty for being below altitude floor during navigation
+    reward_altitude_hold_coef: float = 0.5    # Penalty for dropping below cruise altitude during navigation
+    cruise_altitude: float = 1.0               # Target altitude (m) to hold outside landing corridor
     reward_time_penalty: float = 0.0          # Per-step cost to discourage hovering
     reward_rover_stillness_coef: float = 0.5 # Penalty for rover speed when drone is in landing corridor
     reward_rover_yawrate_coef: float = 0.5  # Penalty for rover yaw rate when drone is in landing corridor

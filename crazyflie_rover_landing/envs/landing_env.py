@@ -265,7 +265,8 @@ def _jit_compute_rewards(
     corridor_transition: float,
     max_descent_speed: float,
     reward_descent_speed_coef: float,
-    reward_altitude_floor_coef: float,
+    reward_altitude_hold_coef: float,
+    cruise_altitude: float,
     reward_time_penalty: float,
     reward_rover_stillness_coef: float,
     reward_rover_yawrate_coef: float,
@@ -312,12 +313,11 @@ def _jit_compute_rewards(
     excess_speed = jnp.maximum(descent_speed - max_descent_speed, 0.0)
     r_descent = -reward_descent_speed_coef * z_weight * excess_speed ** 2
 
-    # Altitude floor — only outside corridor (navigation phase)
-    # Gently discourage premature descent
+    # Altitude hold — only outside corridor (navigation phase)
+    # Penalize dropping below cruise altitude to prevent premature descent
     nav_weight = 1.0 - z_weight
-    altitude_floor = rover_height + 0.3
-    below_floor = jnp.maximum(altitude_floor - drone_pos[:, 2], 0.0)
-    r_altitude = -reward_altitude_floor_coef * nav_weight * below_floor
+    altitude_error = cruise_altitude - drone_pos[:, 2]
+    r_altitude = -reward_altitude_hold_coef * nav_weight * altitude_error ** 2
 
     # Rover stillness — penalize body speed when drone is in landing corridor
     r_rover_stillness = -reward_rover_stillness_coef * z_weight * rover_speed ** 2
@@ -404,7 +404,7 @@ def _jit_compute_rewards(
         "progress_xy": r_xy,
         "progress_z": r_z,
         "descent_speed": r_descent,
-        "altitude_floor": r_altitude,
+        "altitude_hold": r_altitude,
         "angle": r_angle,
         "smooth_drone": r_smooth_drone,
         "smooth_rover": r_smooth_rover,
@@ -1288,7 +1288,8 @@ class LandingEnv(gym.Env):
             self.cfg.corridor_transition,
             self.cfg.max_descent_speed,
             self.cfg.reward_descent_speed_coef,
-            self.cfg.reward_altitude_floor_coef,
+            self.cfg.reward_altitude_hold_coef,
+            self.cfg.cruise_altitude,
             self.cfg.reward_time_penalty,
             self.cfg.reward_rover_stillness_coef,
             self.cfg.reward_rover_yawrate_coef,

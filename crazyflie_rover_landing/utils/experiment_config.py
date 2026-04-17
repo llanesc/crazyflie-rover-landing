@@ -83,7 +83,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
             kwargs[key] = env_cfg[key]
 
     # Rover params (common + type-specific)
-    for key in ("rover_wheel_vel_max", "rover_platform_radius", "landing_zone_radius", "rover_height",
+    for key in ("rover_platform_radius", "landing_zone_radius", "rover_height",
                 "rover_vx_max", "rover_vy_max", "rover_wz_max"):
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
@@ -127,7 +127,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
         "landing_velocity_coef": "reward_landing_velocity_coef",
         "landing_precision_coef": "reward_landing_precision_coef",
         "descent_speed_coef": "reward_descent_speed_coef",
-        "altitude_floor_coef": "reward_altitude_floor_coef",
+        "altitude_hold_coef": "reward_altitude_hold_coef",
         "time_penalty": "reward_time_penalty",
         "rover_stillness_coef": "reward_rover_stillness_coef",
         "rover_yawrate_coef": "reward_rover_yawrate_coef",
@@ -142,7 +142,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
 
     # Landing corridor settings
     for key in ("corridor_radius", "corridor_transition", "max_descent_speed",
-                "max_drone_speed"):
+                "max_drone_speed", "cruise_altitude"):
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
 
