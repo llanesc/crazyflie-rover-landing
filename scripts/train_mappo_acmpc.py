@@ -47,7 +47,6 @@ from crazyflie_rover_landing.envs import LandingEnv, LandingEnvConfig, RescaleAc
 from crazyflie_rover_landing.envs.spawn import create_spawn_fn_from_config
 from crazyflie_rover_landing.policies import (
     DroneACMPCGaussianPolicy,
-    RoverACMPCGaussianPolicy,
     SharedCritic,
 )
 from crazyflie_rover_landing.leap_c.x3_rover_policy_linear_ls import X3RoverACMPCGaussianPolicy
@@ -544,7 +543,7 @@ def main():
         pos_offset_max=d_cfg["pos_offset_max"],
     )
 
-    RoverPolicyCls = X3RoverACMPCGaussianPolicy if env_cfg.rover_type == "x3" else RoverACMPCGaussianPolicy
+    RoverPolicyCls = X3RoverACMPCGaussianPolicy
     rover_policy_kwargs = dict(
         observation_space=rover_obs_space,
         action_space=rover_act_space,

@@ -56,21 +56,22 @@ def find_checkpoint(models_dir: Path, policy_type: str = "acmpc") -> Path:
         models_dir: Path to models/ directory.
         policy_type: "acmpc" or "mlp".
 
-    Priority: best_agent.pt > best_agent_*.pt (highest step) > final_checkpoint.pt > any .pt
+    Priority: agent_STEP.pt (highest step) > final_checkpoint.pt > any .pt
     """
     policy_dir = models_dir / policy_type
     if not policy_dir.is_dir():
         raise FileNotFoundError(f"No {policy_type}/ directory in {models_dir}")
 
-    # best_agent.pt
-    best = policy_dir / "best_agent.pt"
-    if best.is_file():
-        return best
-
-    # best_agent_STEP.pt (sorted descending)
-    best_agents = sorted(policy_dir.glob("best_agent_*.pt"), reverse=True)
-    if best_agents:
-        return best_agents[0]
+    # agent_STEP.pt (highest step number)
+    import re
+    agent_files = []
+    for f in policy_dir.glob("agent_*.pt"):
+        m = re.search(r"agent_(\d+)\.pt$", f.name)
+        if m:
+            agent_files.append((f, int(m.group(1))))
+    if agent_files:
+        agent_files.sort(key=lambda x: x[1], reverse=True)
+        return agent_files[0][0]
 
     # final_checkpoint.pt
     final = policy_dir / "final_checkpoint.pt"

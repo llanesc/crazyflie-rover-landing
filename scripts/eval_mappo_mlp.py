@@ -94,29 +94,23 @@ def find_checkpoint(experiment_path: Path, run_name: str | None) -> Path:
         if not run_dir.exists():
             raise FileNotFoundError(f"Run directory not found: {run_dir}")
 
-        # Prefer final_checkpoint
+        # Prefer latest agent_*.pt by step number
+        import re
+        checkpoints_dir = run_dir / "checkpoints"
+        if checkpoints_dir.exists():
+            agent_files = []
+            for f in checkpoints_dir.glob("agent_*.pt"):
+                m = re.search(r"agent_(\d+)\.pt$", f.name)
+                if m:
+                    agent_files.append((f, int(m.group(1))))
+            if agent_files:
+                agent_files.sort(key=lambda x: x[1], reverse=True)
+                return agent_files[0][0]
+
+        # Fallback to final_checkpoint
         final = run_dir / "final_checkpoint.pt"
         if final.exists():
             return final
-
-        # Try best_agent
-        best_agents = sorted(run_dir.glob("best_agent_*.pt"))
-        if best_agents:
-            return best_agents[-1]
-
-        # Try checkpoints subdir
-        checkpoints_dir = run_dir / "checkpoints"
-        if checkpoints_dir.exists():
-            checkpoints = []
-            for f in checkpoints_dir.glob("agent_*.pt"):
-                try:
-                    step = int(f.stem.split("_")[1])
-                    checkpoints.append((f, step))
-                except (IndexError, ValueError):
-                    continue
-            if checkpoints:
-                checkpoints.sort(key=lambda x: x[1], reverse=True)
-                return checkpoints[0][0]
 
     raise FileNotFoundError(
         f"No checkpoint found. "
