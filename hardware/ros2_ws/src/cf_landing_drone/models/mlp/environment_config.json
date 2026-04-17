@@ -1,7 +1,7 @@
 {
   "policy_type": "mlp",
   "experiment_name": "X3",
-  "drone_model": "cf21B_500",
+  "drone_model": "cf2x_T350",
   "n_worlds": 128,
   "sim_freq": 500,
   "control_freq": 50,
@@ -14,6 +14,8 @@
   "landing_vel_xy_tol": 0.1,
   "landing_vel_z_tol": 0.08,
   "landing_attitude_tol": 0.05,
+  "disturbance_type": "ou",
+  "disturbance_ou_theta": 0.5,
   "drone_obs_dim": 29,
   "rover_obs_dim": 15,
   "shared_state_dim": 24,
