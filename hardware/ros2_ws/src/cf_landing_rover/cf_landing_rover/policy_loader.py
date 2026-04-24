@@ -129,6 +129,8 @@ def _load_rover_acmpc(checkpoint_path, env_config, training_config, device):
         dtype=np.float32,
     )
 
+    wheel_vel_max = env_section.get("rover_wheel_vel_max", 34.9) if r_cfg.get("wheel_dynamics", False) else None
+
     policy = X3RoverACMPCGaussianPolicy(
         observation_space=observation_space,
         action_space=action_space,
@@ -137,6 +139,7 @@ def _load_rover_acmpc(checkpoint_path, env_config, training_config, device):
         mpc_dt=r_cfg["mpc_dt"],
         cost_net_sizes=r_cfg["cost_net_sizes"],
         vx_max=vx_max, vy_max=vy_max, wz_max=wz_max,
+        wheel_vel_max=wheel_vel_max,
         n_batch_max=1,
         activation=r_cfg.get("activation", training_config["policy"].get("cost_net_activation", "relu")),
         pos_offset_max=r_cfg.get("pos_offset_max", 2.0),

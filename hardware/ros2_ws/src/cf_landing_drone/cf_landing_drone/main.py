@@ -115,6 +115,7 @@ def main():
                     "rover_vx_max": 1.0,
                     "rover_vy_max": 1.0,
                     "rover_wz_max": 5.0,
+                    "rover_wheel_vel_max": 34.9,
                     "roll_pitch_max": 0.1,
                     "yaw_max": 0.001,
                     "map_size_x": env_config.get("map_size_x", 15.0),
@@ -129,8 +130,16 @@ def main():
                     "rover_platform_radius": env_config.get("rover_platform_radius", 0.127),
                 },
                 "policy": {
-                    "drone": env_config.get("drone_policy", {"hidden_sizes": [256, 256], "activation": "relu"}),
-                    "rover": env_config.get("rover_policy", {"hidden_sizes": [256, 256], "activation": "relu"}),
+                    "drone": {
+                        **env_config.get("drone_policy", {"hidden_sizes": [256, 256], "activation": "relu"}),
+                        **{k: v for k, v in env_config.get("drone_mpc", {}).items()},
+                        "cost_net_sizes": env_config.get("drone_mpc", {}).get("cost_net_sizes", [256, 256]),
+                    },
+                    "rover": {
+                        **env_config.get("rover_policy", {"hidden_sizes": [256, 256], "activation": "relu"}),
+                        **{k: v for k, v in env_config.get("rover_mpc", {}).items()},
+                        "cost_net_sizes": env_config.get("rover_mpc", {}).get("cost_net_sizes", [256, 256]),
+                    },
                     "cost_net_activation": "relu",
                 },
             }
