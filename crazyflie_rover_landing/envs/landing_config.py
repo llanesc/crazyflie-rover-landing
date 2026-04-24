@@ -74,6 +74,7 @@ class LandingEnvConfig:
     drone_model: str = "cf2x_T350"
     dynamics: str = "first_principles"
     mass: float | None = None
+    sim_mass: float | None = None
     randomize_mass: bool = False
     randomize_inertia: bool = False
     mass_randomization_std: float = 2e-3
@@ -91,6 +92,15 @@ class LandingEnvConfig:
     disturbance_torque_std: float = 1e-4
     disturbance_ou_theta: float = 2.0   # OU mean-reversion rate [1/s] (lower = smoother)
 
+    # Wind disturbance (aerodynamic drag model)
+    enable_wind: bool = False
+    wind_speed: float = 0.0             # Constant wind speed [m/s]
+    wind_direction: float = 0.0         # Wind direction [deg], 0=+X, 90=+Y
+    gust_intensity: float = 0.0         # OU gust peak deviation [m/s]
+    gust_correlation_time: float = 4.0  # OU correlation time [s]
+    turbulence_level: str = "none"      # Dryden turbulence: none, light, moderate, severe
+    turbulence_time_constant: float = 5.0  # Dryden length-scale proxy [s]
+
     # Rover physical limits
     rover_platform_radius: float = 0.10  # Landing pad radius [m]
     landing_zone_radius: float = 0.07    # Safe landing zone radius [m] (smaller than pad — edge landings crash)
@@ -100,6 +110,7 @@ class LandingEnvConfig:
     rover_vx_max: float = 1.0           # m/s  (ROS /cmd_vel forward limit)
     rover_vy_max: float = 1.0           # m/s  (ROS /cmd_vel lateral limit)
     rover_wz_max: float = 5.0           # rad/s (ROS /cmd_vel yaw rate limit)
+    rover_wheel_vel_max: float = 34.9   # rad/s (333 RPM motor, 1:30 gear ratio)
 
     # Arena / boundary
     map_size_x: float = 5.0   # Total size; drone stays within ±2.5 m

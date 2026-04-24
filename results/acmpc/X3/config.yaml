@@ -1,6 +1,6 @@
 environment:
   rover_type: "x3"
-  drone_model: "cf2x_T350"
+  drone_model: "cf21B_500"
   dynamics: "first_principles"
   sim_freq: 500
   mellinger_freq: 500
@@ -88,6 +88,7 @@ policy:
     cost_net_sizes: [256, 256]
     pos_offset_max: 0.25
     initial_log_std: [-0.6, -0.6, -0.6]  # vx, vy, ωz
+    wheel_dynamics: true  # use per-wheel kinematics + saturation in MPC model
 
 training:
   timesteps: 2_000_000

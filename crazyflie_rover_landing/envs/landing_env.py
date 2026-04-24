@@ -28,6 +28,7 @@ from drone_models.core import load_params
 
 from crazyflie_rover_landing.envs.landing_config import LandingEnvConfig
 from crazyflie_rover_landing.envs.mecanum_dynamics import mecanum_step_batched, WHEEL_VEL_MAX
+from crazyflie_rover_landing.envs.wind import WindModel, compute_wind_drag_force
 from crazyflie_rover_landing.envs.spawn import SpawnFn, create_default_spawn_fn
 
 
@@ -510,10 +511,11 @@ class LandingEnv(gym.Env):
         # Add rover landing pad as a mocap body for contact-based landing detection
         self._add_landing_pad_to_scene()
 
-        # Override mass if provided
-        if self.cfg.mass is not None:
+        # Override sim mass (sim_mass overrides only the simulator, not MPC)
+        override_mass = self.cfg.sim_mass if self.cfg.sim_mass is not None else self.cfg.mass
+        if override_mass is not None:
             params = self.sim.data.params.replace(
-                mass=jnp.full_like(self.sim.data.params.mass, self.cfg.mass)
+                mass=jnp.full_like(self.sim.data.params.mass, override_mass)
             )
             self.sim.data = self.sim.data.replace(params=params)
             self.sim.default_data = self.sim.default_data.replace(params=params)
@@ -531,6 +533,13 @@ class LandingEnv(gym.Env):
 
         # Pre-create ground effect function if configured (always-on, not toggled)
         self._ge_fn = self._create_ground_effect_fn() if self.cfg.enable_ground_effect else None
+
+        # Wind model
+        self._wind_model = None
+        self._wind_drag_matrix = None
+        self._wind_enabled = False
+        if self.cfg.enable_wind:
+            self._init_wind_model()
 
         # Build the full pipeline with current disturbance/GE settings
         self._rebuild_step_pipeline()
@@ -618,6 +627,96 @@ class LandingEnv(gym.Env):
         # Reduce to per-world: any contact for the drone
         return np.asarray(contact_flags.any(axis=-1))
 
+    def set_sim_mass(self, mass: float):
+        """Override the Crazyflow simulator mass without recreating the env."""
+        self.cfg.sim_mass = mass
+        params = self.sim.data.params.replace(
+            mass=jnp.full_like(self.sim.data.params.mass, mass)
+        )
+        self.sim.data = self.sim.data.replace(params=params)
+        self.sim.default_data = self.sim.default_data.replace(params=params)
+
+    def set_disturbance(self, enabled: bool,
+                        force_std: float | None = None,
+                        torque_std: float | None = None):
+        """Enable/disable disturbance and update magnitudes without recreating the env."""
+        if force_std is not None:
+            self.cfg.disturbance_force_std = force_std
+        if torque_std is not None:
+            self.cfg.disturbance_torque_std = torque_std
+        self._disturbance_enabled = enabled
+        self.cfg.enable_disturbance = enabled
+        self._rebuild_step_pipeline()
+
+    def _init_wind_model(self):
+        """Initialize the wind model and drag matrix."""
+        fp_params = load_params("first_principles", self.cfg.drone_model)
+        self._wind_drag_matrix = jnp.array(fp_params["drag_matrix"])
+        self._wind_model = WindModel(
+            n_worlds=self.cfg.n_worlds,
+            wind_speed=self.cfg.wind_speed,
+            wind_direction=self.cfg.wind_direction,
+            gust_intensity=self.cfg.gust_intensity,
+            gust_correlation_time=self.cfg.gust_correlation_time,
+            turbulence_level=self.cfg.turbulence_level,
+            turbulence_time_constant=self.cfg.turbulence_time_constant,
+            dt=self.cfg.dt,
+        )
+        self._wind_velocity = jnp.zeros((self.cfg.n_worlds, 1, 3))
+        self._wind_enabled = True
+
+    def set_wind(self, enabled: bool = True,
+                 wind_speed: float | None = None,
+                 wind_direction: float | None = None,
+                 gust_intensity: float | None = None,
+                 turbulence_level: str | None = None):
+        """Configure wind disturbance without recreating the env."""
+        if wind_speed is not None:
+            self.cfg.wind_speed = wind_speed
+        if wind_direction is not None:
+            self.cfg.wind_direction = wind_direction
+        if gust_intensity is not None:
+            self.cfg.gust_intensity = gust_intensity
+        if turbulence_level is not None:
+            self.cfg.turbulence_level = turbulence_level
+        self.cfg.enable_wind = enabled
+        if enabled:
+            self._init_wind_model()
+        else:
+            self._wind_model = None
+            self._wind_enabled = False
+        self._rebuild_step_pipeline()
+
+    def _create_wind_fn(self):
+        """Create a wind drag function for the simulation pipeline.
+
+        Wind velocity is computed outside JIT in _update_wind_state() and
+        stored in self._wind_velocity. The pipeline function reads it via
+        closure (same pattern as OU disturbance).
+        """
+        drag_matrix = self._wind_drag_matrix
+
+        def wind_fn(data: SimData) -> SimData:
+            drag_force = compute_wind_drag_force(
+                data.states.quat, self._wind_velocity, drag_matrix
+            )
+            states = data.states.replace(
+                force=data.states.force + drag_force,
+            )
+            return data.replace(states=states)
+
+        return wind_fn
+
+    def _update_wind_state(self):
+        """Advance wind model state by one control step. Called outside JIT."""
+        if not self._wind_enabled or self._wind_model is None:
+            return
+        key = self.sim.data.core.rng_key
+        key, wind_key = jax.random.split(key)
+        self.sim.data = self.sim.data.replace(
+            core=self.sim.data.core.replace(rng_key=key))
+        self._wind_velocity = self._wind_model.step(wind_key)
+
     def _apply_domain_randomization(self, mask: jnp.ndarray | None = None):
         """Randomize mass and/or inertia for enabled worlds."""
         if not self.cfg.randomize_mass and not self.cfg.randomize_inertia:
@@ -628,8 +727,10 @@ class LandingEnv(gym.Env):
             mass_noise = jax.random.normal(
                 key, (self.cfg.n_worlds, 1, 1)
             ) * self.cfg.mass_randomization_std
-            base_mass = self.cfg.mass if self.cfg.mass is not None else float(
-                self.sim.data.params.mass.mean()
+            base_mass = self.cfg.sim_mass if self.cfg.sim_mass is not None else (
+                self.cfg.mass if self.cfg.mass is not None else float(
+                    self.sim.data.params.mass.mean()
+                )
             )
             randomize_mass(self.sim, base_mass + mass_noise, mask)
 
@@ -823,7 +924,7 @@ class LandingEnv(gym.Env):
           3. ground_effect_fn — adds per-rotor GE force/torque (if enabled)
         """
         extra_fns = []
-        need_reset = self._disturbance_enabled or self._ge_fn is not None
+        need_reset = self._disturbance_enabled or self._ge_fn is not None or self._wind_enabled
 
         if need_reset:
             def reset_external_forces(data: SimData) -> SimData:
@@ -834,6 +935,9 @@ class LandingEnv(gym.Env):
 
         if self._disturbance_enabled:
             extra_fns.append(self._create_disturbance_fn())
+
+        if self._wind_enabled:
+            extra_fns.append(self._create_wind_fn())
 
         if self._ge_fn is not None:
             extra_fns.append(self._ge_fn)
@@ -978,6 +1082,10 @@ class LandingEnv(gym.Env):
         N = self.cfg.n_worlds
         self._ou_force = jnp.zeros((N, 1, 3))
         self._ou_torque = jnp.zeros((N, 1, 3))
+
+        # Reset wind model state
+        if self._wind_model is not None:
+            self._wind_model.reset()
 
         self._spawn_agents()
         self._init_last_dist()
@@ -1226,6 +1334,7 @@ class LandingEnv(gym.Env):
         # Step drone (Crazyflow)
         self.sim.attitude_control(self.drone_cmd[:, None, :])
         self._update_ou_state()  # Advance OU disturbance (once per control step)
+        self._update_wind_state()  # Advance wind model (once per control step)
         self.sim.step(n_steps=self.cfg.sim_steps_per_control)
 
         # Extract drone state

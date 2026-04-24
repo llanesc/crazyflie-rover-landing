@@ -10,18 +10,16 @@ State:   [x, y, c, s, vx, vy, ωz]  (NX_ROVER = 7)
 Control: [vx_cmd, vy_cmd, ωz_cmd]  (NU_ROVER = 3)
   Body-frame velocity commands matching the real /cmd_vel interface.
 
-Dynamics (continuous-time, RK4 integrated):
-  ẋ  = vx·c − vy·s
-  ẏ  = vx·s + vy·c
-  ċ  = −ωz·s
-  ṡ  =  ωz·c
-  v̇x = (vx_cmd − vx) / τ
-  v̇y = (vy_cmd − vy) / τ
-  ω̇z = (ωz_cmd − ωz) / τ
+Dynamics (continuous-time, RK4 integrated) with per-wheel saturation:
+  1. Inverse kinematics: body cmd → 4 wheel angular velocity targets
+  2. Clip each wheel to [-ω_max, ω_max]
+  3. Inverse kinematics: current body vel → 4 current wheel speeds
+  4. Per-wheel first-order lag: ω̇_i = (target_i − current_i) / τ
+  5. Forward kinematics: wheel derivatives → body velocity derivatives
+  6. Pose update in world frame
 
-The first-order dynamics model the STM32 PID controller response.
-The OCP relies on box constraints (rather than wheel-level clipping)
-to keep body velocities within the physically achievable region.
+This matches the sim dynamics in mecanum_dynamics.py, where the STM32
+PID runs independently per wheel with motor saturation.
 
 Cost: J = 0.5·(y − y_ref)'·W·(y − y_ref),  y = [x; u]
 """
@@ -40,6 +38,11 @@ NY_ROVER = NX_ROVER + NU_ROVER  # 10
 
 # Physical constants (RosMaster X3)
 _TAU: float = 0.1    # s — first-order PID time constant
+_WHEEL_RADIUS: float = 0.0325    # m (65 mm mecanum wheel)
+_HALF_WHEELBASE: float = 0.08    # m (160 mm / 2, front-to-rear)
+_HALF_TRACK: float = 0.0845      # m (169 mm / 2, left-to-right)
+_K: float = _HALF_WHEELBASE + _HALF_TRACK  # 0.1645 m
+_WHEEL_VEL_MAX: float = 34.9     # rad/s (333 RPM motor, 1:30 gear ratio)
 
 # Velocity command limits (ROS /cmd_vel)
 _VX_MAX: float = 1.0    # m/s
@@ -51,11 +54,31 @@ _WZ_MAX: float = 5.0    # rad/s
 # CasADi mecanum dynamics
 # ---------------------------------------------------------------------------
 
-def _mecanum_ode(x: ca.SX, u: ca.SX) -> ca.SX:
-    """Continuous-time mecanum ODE with first-order velocity tracking.
+def _inv_kinematics_ca(vx: ca.SX, vy: ca.SX, wz: ca.SX) -> ca.SX:
+    """Body-frame velocities → 4 wheel angular velocities (CasADi)."""
+    r_inv = 1.0 / _WHEEL_RADIUS
+    return ca.vertcat(
+        r_inv * (vx - vy - _K * wz),   # front-left
+        r_inv * (vx + vy + _K * wz),   # front-right
+        r_inv * (vx + vy - _K * wz),   # back-left
+        r_inv * (vx - vy + _K * wz),   # back-right
+    )
 
-    State: [x, y, c, s, vx, vy, ωz]
-    Control: [vx_cmd, vy_cmd, ωz_cmd]
+
+def _fwd_kinematics_ca(wheels: ca.SX) -> tuple[ca.SX, ca.SX, ca.SX]:
+    """4 wheel angular velocities → body-frame velocities (CasADi)."""
+    r4 = _WHEEL_RADIUS / 4.0
+    vx = r4 * (wheels[0] + wheels[1] + wheels[2] + wheels[3])
+    vy = r4 * (-wheels[0] + wheels[1] + wheels[2] - wheels[3])
+    wz = r4 / _K * (-wheels[0] + wheels[1] - wheels[2] + wheels[3])
+    return vx, vy, wz
+
+
+def _mecanum_ode_simple(x: ca.SX, u: ca.SX) -> ca.SX:
+    """Continuous-time mecanum ODE with first-order body-velocity tracking.
+
+    No wheel-level kinematics or saturation — assumes body velocity commands
+    are directly achievable.
     """
     c, s = x[2], x[3]
     vx, vy, wz = x[4], x[5], x[6]
@@ -71,20 +94,70 @@ def _mecanum_ode(x: ca.SX, u: ca.SX) -> ca.SX:
     )
 
 
-def _integrate_rk4_rover(x: ca.SX, u: ca.SX, dt: float) -> ca.SX:
+def _mecanum_ode_wheel(x: ca.SX, u: ca.SX, wheel_vel_max: float) -> ca.SX:
+    """Continuous-time mecanum ODE with per-wheel saturation.
+
+    Routes through inverse/forward kinematics with per-motor clipping,
+    matching the sim dynamics in mecanum_dynamics.py.
+    """
+    c, s = x[2], x[3]
+    vx, vy, wz = x[4], x[5], x[6]
+
+    # Commanded wheel targets (from body velocity command), clipped per motor
+    wheels_target = _inv_kinematics_ca(u[0], u[1], u[2])
+    wheels_target = ca.fmin(ca.fmax(wheels_target, -wheel_vel_max), wheel_vel_max)
+
+    # Current wheel speeds (from current body velocity)
+    wheels_current = _inv_kinematics_ca(vx, vy, wz)
+
+    # Per-wheel first-order lag
+    wheels_dot = (wheels_target - wheels_current) / _TAU
+
+    # Forward kinematics of wheel derivatives → body velocity derivatives
+    dvx, dvy, dwz = _fwd_kinematics_ca(wheels_dot)
+
+    return ca.vertcat(
+        vx * c - vy * s,    # ẋ
+        vx * s + vy * c,    # ẏ
+        -wz * s,            # ċ
+         wz * c,            # ṡ
+        dvx,                # v̇x
+        dvy,                # v̇y
+        dwz,                # ω̇z
+    )
+
+
+def _integrate_rk4_rover(
+    x: ca.SX, u: ca.SX, dt: float,
+    wheel_vel_max: float | None,
+) -> ca.SX:
     """RK4 integration of the mecanum ODE."""
-    k1 = _mecanum_ode(x, u)
-    k2 = _mecanum_ode(x + dt / 2 * k1, u)
-    k3 = _mecanum_ode(x + dt / 2 * k2, u)
-    k4 = _mecanum_ode(x + dt * k3, u)
+    def ode(x_, u_):
+        if wheel_vel_max is not None:
+            return _mecanum_ode_wheel(x_, u_, wheel_vel_max)
+        return _mecanum_ode_simple(x_, u_)
+
+    k1 = ode(x, u)
+    k2 = ode(x + dt / 2 * k1, u)
+    k3 = ode(x + dt / 2 * k2, u)
+    k4 = ode(x + dt * k3, u)
     return x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
-def define_mecanum_dynamics(dt: float) -> tuple[ca.SX, ca.SX, ca.SX]:
-    """Define discrete mecanum dynamics using RK4."""
+def define_mecanum_dynamics(
+    dt: float,
+    wheel_vel_max: float | None = _WHEEL_VEL_MAX,
+) -> tuple[ca.SX, ca.SX, ca.SX]:
+    """Define discrete mecanum dynamics using RK4.
+
+    Args:
+        dt: Integration timestep [s].
+        wheel_vel_max: Max wheel angular velocity [rad/s]. If None, uses
+            the simple body-velocity model (no wheel-level clipping).
+    """
     x = ca.SX.sym("x", NX_ROVER)
     u = ca.SX.sym("u", NU_ROVER)
-    x_next = _integrate_rk4_rover(x, u, dt)
+    x_next = _integrate_rk4_rover(x, u, dt, wheel_vel_max)
     return x_next, x, u
 
 
@@ -178,6 +251,7 @@ def export_x3_rover_ocp_linear_ls(
     vx_max: float = _VX_MAX,
     vy_max: float = _VY_MAX,
     wz_max: float = _WZ_MAX,
+    wheel_vel_max: float | None = _WHEEL_VEL_MAX,
 ) -> AcadosOcp:
     """Export the X3 rover OCP for LEAP-C using LINEAR_LS cost structure."""
     ocp = AcadosOcp()
@@ -190,7 +264,7 @@ def export_x3_rover_ocp_linear_ls(
     ocp.dims.nx = NX_ROVER
     ocp.dims.nu = NU_ROVER
 
-    x_next, x, u = define_mecanum_dynamics(dt)
+    x_next, x, u = define_mecanum_dynamics(dt, wheel_vel_max=wheel_vel_max)
     ocp.model.x = x
     ocp.model.u = u
     ocp.model.disc_dyn_expr = x_next

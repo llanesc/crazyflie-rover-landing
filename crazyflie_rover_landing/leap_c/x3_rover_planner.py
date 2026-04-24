@@ -29,6 +29,7 @@ from crazyflie_rover_landing.leap_c.x3_rover_ocp_linear_ls import (
     _VX_MAX,
     _VY_MAX,
     _WZ_MAX,
+    _WHEEL_VEL_MAX,
 )
 
 
@@ -84,6 +85,7 @@ class X3RoverPlannerConfig:
     vx_max: float        = _VX_MAX
     vy_max: float        = _VY_MAX
     wz_max: float        = _WZ_MAX
+    wheel_vel_max: float | None = _WHEEL_VEL_MAX
     dtype: torch.dtype   = torch.float32
 
     def __post_init__(self) -> None:
@@ -130,6 +132,7 @@ class X3RoverPlanner(AcadosPlanner[AcadosDiffMpcCtx]):
             vx_max=self.cfg.vx_max,
             vy_max=self.cfg.vy_max,
             wz_max=self.cfg.wz_max,
+            wheel_vel_max=self.cfg.wheel_vel_max,
         )
 
         initializer = X3RoverStationaryInitializer(ocp)

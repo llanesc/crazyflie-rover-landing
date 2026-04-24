@@ -1,6 +1,6 @@
 environment:
   rover_type: "x3"
-  drone_model: "cf2x_T350"
+  drone_model: "cf21B_500"
   dynamics: "first_principles"
   sim_freq: 500
   mellinger_freq: 500

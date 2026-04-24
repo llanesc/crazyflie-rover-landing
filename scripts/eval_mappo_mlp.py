@@ -36,6 +36,7 @@ from crazyflie_rover_landing.utils import (
     get_spawn_fn_from_config,
     get_training_config,
     find_experiment_path,
+    apply_overrides,
 )
 
 
@@ -84,6 +85,15 @@ def parse_args():
                         help="Fixed rover initial position x,y (e.g. '0,0')")
     parser.add_argument("--log-csv", type=str, default=None,
                         help="Save per-step obs/action data to CSV file")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Write results JSON to this path instead of run dir")
+    parser.add_argument("--override", type=str, nargs="+", default=None,
+                        help="Override LandingEnvConfig fields as key=value pairs "
+                             "(e.g., --override mass=0.040 rover_vx_max=0.5)")
+    parser.add_argument("--no-domain-rand", action="store_true",
+                        help="Disable domain randomization (mass/inertia)")
+    parser.add_argument("--no-disturbance", action="store_true",
+                        help="Disable disturbances")
     return parser.parse_args()
 
 
@@ -235,6 +245,19 @@ def main():
             return drone_pos, rover_state
         spawn_fn = fixed_spawn_fn
         print(f"Fixed spawn: drone=({drone_xy[0]}, {drone_xy[1]}, 1.0) rover=({rover_xy[0]}, {rover_xy[1]})")
+
+    # Disable domain randomization / disturbance if requested
+    if args.no_domain_rand:
+        env_cfg.randomize_mass = False
+        env_cfg.randomize_inertia = False
+    if args.no_disturbance:
+        env_cfg.enable_disturbance = False
+
+    # Apply generic config overrides
+    override_meta = {}
+    if args.override:
+        override_meta = apply_overrides(env_cfg, args.override)
+        print(f"Config overrides: {override_meta}")
 
     # Override n_worlds if specified
     if args.n_worlds is not None:
@@ -540,8 +563,14 @@ def main():
         "oob": oob,
         "timeouts": timeouts,
     }
+    if override_meta:
+        results["overrides"] = override_meta
 
-    results_path = checkpoint_path.parent / "eval_results.json"
+    if args.output:
+        results_path = Path(args.output)
+        results_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        results_path = checkpoint_path.parent / "eval_results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Results saved to: {results_path}")

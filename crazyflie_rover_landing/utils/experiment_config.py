@@ -8,7 +8,6 @@ from pathlib import Path
 import yaml
 
 from crazyflie_rover_landing.envs.landing_config import LandingEnvConfig
-from crazyflie_rover_landing.envs.spawn import SpawnFn, create_spawn_fn_from_config
 
 
 def load_experiment_config(experiment_path: Path) -> dict:
@@ -84,7 +83,8 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
 
     # Rover params (common + type-specific)
     for key in ("rover_platform_radius", "landing_zone_radius", "rover_height",
-                "rover_vx_max", "rover_vy_max", "rover_wz_max"):
+                "rover_vx_max", "rover_vy_max", "rover_wz_max",
+                "rover_wheel_vel_max"):
         if key in env_cfg:
             kwargs[key] = env_cfg[key]
 
@@ -159,7 +159,7 @@ def config_to_env_config(config: dict, device: str | None = None) -> LandingEnvC
     return LandingEnvConfig(**kwargs)
 
 
-def get_spawn_fn_from_config(config: dict, rover_nx: int | None = None) -> SpawnFn:
+def get_spawn_fn_from_config(config: dict, rover_nx: int | None = None):
     """Create spawn function from experiment configuration.
 
     Uses curriculum level 0 spawn if curriculum is defined; otherwise falls
@@ -171,6 +171,8 @@ def get_spawn_fn_from_config(config: dict, rover_nx: int | None = None) -> Spawn
     Returns:
         Spawn function with signature (key, N) -> (drone_pos, rover_state).
     """
+    from crazyflie_rover_landing.envs.spawn import create_spawn_fn_from_config
+
     # Infer rover state dimension from rover_type if not provided
     if rover_nx is None:
         rover_type = config.get("environment", {}).get("rover_type", "burger")

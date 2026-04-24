@@ -45,9 +45,8 @@ from crazyflie_rover_landing.utils import (
     load_experiment_config,
     config_to_env_config,
     get_spawn_fn_from_config,
-    get_training_config,
-    get_policy_config,
     find_experiment_path,
+    apply_overrides,
 )
 
 
@@ -90,6 +89,15 @@ def parse_args():
     parser.add_argument("--cam-lookat", type=float, nargs=3, default=None,
                         metavar=("X", "Y", "Z"),
                         help="Camera lookat point (3 floats)")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Write results JSON to this path instead of run dir")
+    parser.add_argument("--override", type=str, nargs="+", default=None,
+                        help="Override LandingEnvConfig fields as key=value pairs "
+                             "(e.g., --override mass=0.040 rover_vx_max=0.5)")
+    parser.add_argument("--no-domain-rand", action="store_true",
+                        help="Disable domain randomization (mass/inertia)")
+    parser.add_argument("--no-disturbance", action="store_true",
+                        help="Disable disturbances")
     return parser.parse_args()
 
 
@@ -124,72 +132,147 @@ def find_checkpoint(experiment_path: Path, run_name: str | None) -> Path:
     )
 
 
+def load_run_configs(run_dir: Path) -> tuple[dict, dict]:
+    """Load environment_config.json and learning_config.json from a run directory."""
+    env_config_path = run_dir / "environment_config.json"
+    learning_config_path = run_dir / "learning_config.json"
+
+    if not env_config_path.exists():
+        raise FileNotFoundError(f"environment_config.json not found in {run_dir}")
+
+    with open(env_config_path) as f:
+        env_config = json.load(f)
+
+    learning_config = {}
+    if learning_config_path.exists():
+        with open(learning_config_path) as f:
+            learning_config = json.load(f)
+
+    return env_config, learning_config
+
+
+def env_config_to_policy_cfg(env_config: dict) -> dict:
+    """Build policy_cfg dict from environment_config.json structure."""
+    drone_mpc = env_config.get("drone_mpc", {})
+    rover_mpc = env_config.get("rover_mpc", {})
+    return {
+        "drone": {
+            "mpc_horizon": drone_mpc["mpc_horizon"],
+            "mpc_dt": drone_mpc["mpc_dt"],
+            "cost_net_sizes": drone_mpc.get("cost_net_sizes", [256, 256]),
+            "state_type": drone_mpc.get("state_type", "euler"),
+            "integrator": drone_mpc.get("integrator", "rk4"),
+            "roll_pitch_max": drone_mpc.get("roll_pitch_max", 0.5),
+            "yaw_max": drone_mpc.get("yaw_max", 0.5),
+            "pos_offset_max": drone_mpc.get("pos_offset_max", 2.0),
+            "initial_log_std": drone_mpc.get("initial_log_std", -1.2),
+            "activation": drone_mpc.get("activation", "relu"),
+        },
+        "rover": {
+            "mpc_horizon": rover_mpc["mpc_horizon"],
+            "mpc_dt": rover_mpc["mpc_dt"],
+            "cost_net_sizes": rover_mpc.get("cost_net_sizes", [256, 256]),
+            "pos_offset_max": rover_mpc.get("pos_offset_max", 2.0),
+            "initial_log_std": rover_mpc.get("initial_log_std", -1.2),
+            "activation": rover_mpc.get("activation", "relu"),
+            "wheel_dynamics": rover_mpc.get("wheel_dynamics", False),
+        },
+        "value_net_sizes": env_config.get("value_net_sizes", [256, 256]),
+        "value_activation": env_config.get("value_activation", "relu"),
+    }
+
+
 def main():
     args = parse_args()
 
     experiment_path = find_experiment_path(args.experiment)
-    config = load_experiment_config(experiment_path)
 
-    # Find checkpoint
+    # Find checkpoint and run directory
     if args.checkpoint is not None:
         checkpoint_path = Path(args.checkpoint)
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        # Infer run dir from checkpoint path (checkpoints/ parent)
+        run_dir = checkpoint_path.parent.parent
     else:
         checkpoint_path = find_checkpoint(experiment_path, args.run)
+        run_dir = checkpoint_path.parent.parent
 
     print(f"Loading checkpoint: {checkpoint_path}")
+    print(f"Run directory: {run_dir}")
 
-    training_cfg = get_training_config(config)
-    policy_cfg = get_policy_config(config)
+    # Load configs from the run directory
+    env_run_config, learning_config = load_run_configs(run_dir)
+    policy_cfg = env_config_to_policy_cfg(env_run_config)
+
+    # Fall back to experiment config.yaml for fields not yet in environment_config.json
+    config = load_experiment_config(experiment_path)
 
     device = torch.device("cpu")
 
     env_cfg = config_to_env_config(config, device="cpu")
-    spawn_fn = get_spawn_fn_from_config(config)
+    # Override env_cfg with run-specific values from environment_config.json
+    if "rover_type" in env_run_config:
+        env_cfg.rover_type = env_run_config["rover_type"]
+    if "drone_model" in env_run_config:
+        env_cfg.drone_model = env_run_config["drone_model"]
+    drone_mpc = env_run_config.get("drone_mpc", {})
+    if "roll_pitch_max" in drone_mpc:
+        env_cfg.roll_pitch_max = drone_mpc["roll_pitch_max"]
+    if "yaw_max" in drone_mpc:
+        env_cfg.yaw_max = drone_mpc["yaw_max"]
+    if "state_type" in drone_mpc:
+        env_cfg.drone_state_type = drone_mpc["state_type"]
 
-    # Override spawn with specific curriculum level if requested
+    # Curriculum / spawn from learning_config.json
+    curriculum_data = learning_config.get("curriculum", {})
+    curriculum_levels = curriculum_data.get("levels", [])
+
     if args.level is not None:
-        curriculum_cfg = config.get("curriculum", {})
-        levels = curriculum_cfg.get("levels", [])
-        if args.level < 1 or args.level > len(levels):
+        if not curriculum_levels:
+            raise ValueError("No curriculum levels found in learning_config.json")
+        if args.level < 1 or args.level > len(curriculum_levels):
             raise ValueError(
                 f"--level {args.level} out of range. "
-                f"Available levels: 1-{len(levels)}"
+                f"Available levels: 1-{len(curriculum_levels)}"
             )
-        level = levels[args.level - 1]
-        spawn_cfg = {}
-        if "drone_spawn" in level:
-            spawn_cfg["drone"] = level["drone_spawn"]
-        if "rover_spawn" in level:
-            spawn_cfg["rover"] = level["rover_spawn"]
+        level = curriculum_levels[args.level - 1]
+        spawn_cfg = level.get("spawn", {})
         if spawn_cfg:
-            # Force rover to spawn stationary for eval
             spawn_cfg.setdefault("rover", {})["stationary"] = True
             spawn_fn = create_spawn_fn_from_config(spawn_cfg, rover_nx=env_cfg.rover_nx)
+        else:
+            spawn_fn = get_spawn_fn_from_config(config)
         # Apply env overrides from the level
-        if level.get("randomize_mass") is not None:
-            env_cfg.randomize_mass = level["randomize_mass"]
-        if level.get("randomize_inertia") is not None:
-            env_cfg.randomize_inertia = level["randomize_inertia"]
-        if level.get("enable_disturbance") is not None:
-            env_cfg.enable_disturbance = level["enable_disturbance"]
+        level_params = level.get("params", {})
+        if level_params.get("randomize_mass") is not None:
+            env_cfg.randomize_mass = level_params["randomize_mass"]
+        if level_params.get("randomize_inertia") is not None:
+            env_cfg.randomize_inertia = level_params["randomize_inertia"]
+        if level_params.get("enable_disturbance") is not None:
+            env_cfg.enable_disturbance = level_params["enable_disturbance"]
         print(f"Using curriculum level {args.level}: '{level.get('name', 'unnamed')}'")
     else:
-        # No level specified — rebuild default spawn with stationary rover
-        curriculum_cfg = config.get("curriculum", {})
-        levels = curriculum_cfg.get("levels", [])
-        if curriculum_cfg.get("enabled", False) and levels:
-            level0 = levels[0]
-            spawn_cfg = {}
-            if "drone_spawn" in level0:
-                spawn_cfg["drone"] = level0["drone_spawn"]
-            if "rover_spawn" in level0:
-                spawn_cfg["rover"] = level0["rover_spawn"]
+        # No level specified — use first curriculum level spawn with stationary rover
+        if curriculum_levels:
+            spawn_cfg = curriculum_levels[0].get("spawn", {})
         else:
             spawn_cfg = config.get("environment", {}).get("spawn", {})
         spawn_cfg.setdefault("rover", {})["stationary"] = True
-        spawn_fn = create_spawn_fn_from_config(spawn_cfg)
+        spawn_fn = create_spawn_fn_from_config(spawn_cfg, rover_nx=env_cfg.rover_nx)
+
+    # Disable domain randomization / disturbance if requested
+    if args.no_domain_rand:
+        env_cfg.randomize_mass = False
+        env_cfg.randomize_inertia = False
+    if args.no_disturbance:
+        env_cfg.enable_disturbance = False
+
+    # Apply generic config overrides
+    override_meta = {}
+    if args.override:
+        override_meta = apply_overrides(env_cfg, args.override)
+        print(f"Config overrides: {override_meta}")
 
     # Override n_worlds if specified
     if args.n_worlds is not None:
@@ -321,10 +404,7 @@ def main():
             vx_max=env_cfg.rover_vx_max,
             vy_max=env_cfg.rover_vy_max,
             wz_max=env_cfg.rover_wz_max,
-        )
-    else:
-        rover_policy_kwargs.update(
-            wheel_vel_max=env_cfg.rover_wheel_vel_max,
+            wheel_vel_max=env_cfg.rover_wheel_vel_max if r_cfg.get("wheel_dynamics", False) else None,
         )
     rover_policy = RoverPolicyCls(**rover_policy_kwargs)
 
@@ -351,9 +431,11 @@ def main():
     # Set up preprocessors matching training config
     from skrl.resources.preprocessors.torch import RunningStandardScaler
 
+    preprocessors = learning_config.get("preprocessors", {})
+
     obs_preprocessor_class = None
     obs_preprocessor_kwargs = {a: {} for a in possible_agents}
-    if training_cfg.get("observation_preprocessor") == "RunningStandardScaler":
+    if preprocessors.get("observation") == "RunningStandardScaler":
         obs_preprocessor_class = PartialRunningStandardScaler
         obs_preprocessor_kwargs = {
             "drone": {"size": raw_env.drone_obs_dim,
@@ -364,7 +446,7 @@ def main():
 
     state_preprocessor_class = None
     state_preprocessor_kwargs = {a: {} for a in possible_agents}
-    if training_cfg.get("state_preprocessor") == "RunningStandardScaler":
+    if preprocessors.get("state") == "RunningStandardScaler":
         state_preprocessor_class = PartialRunningStandardScaler
         base_kwargs = {"size": raw_env.shared_state_dim,
                        "skip_dims": raw_env.state_binary_dims, "device": device}
@@ -372,7 +454,7 @@ def main():
 
     value_preprocessor_class = None
     value_preprocessor_kwargs = {a: {} for a in possible_agents}
-    if training_cfg.get("value_preprocessor") == "RunningStandardScaler":
+    if preprocessors.get("value") == "RunningStandardScaler":
         value_preprocessor_class = RunningStandardScaler
         base_kwargs = {"size": 1, "device": device}
         value_preprocessor_kwargs = {a: base_kwargs.copy() for a in possible_agents}
@@ -437,7 +519,8 @@ def main():
     screenshot_frame = None
     max_steps_per_episode = raw_env.cfg.max_episode_steps
 
-    print(f"Evaluating {n_episodes} episodes across {n_worlds} worlds...")
+    from tqdm import tqdm
+    pbar = tqdm(total=n_episodes, desc="Evaluating", unit="ep")
 
     while episodes_done < n_episodes:
         # Get actions (deterministic: use mean of distribution)
@@ -468,6 +551,9 @@ def main():
         oob += n_oob
         timeouts += n_timeout
         episodes_done += n_done_this_step
+        if n_done_this_step > 0:
+            pbar.update(n_done_this_step)
+            pbar.set_postfix(land=landings, crash=crashes, oob=oob, timeout=timeouts)
 
         # Screenshot: render right after target episode ends (pre-reset state
         # is saved and will be consumed by this render call)
@@ -504,6 +590,8 @@ def main():
     oob_rate = oob / total if total > 0 else 0.0
     timeout_rate = timeouts / total if total > 0 else 0.0
 
+    pbar.close()
+
     print(f"\n{'='*60}")
     print(f"Evaluation Results ({total} episodes):")
     print(f"{'='*60}")
@@ -526,12 +614,17 @@ def main():
         "oob": oob,
         "timeouts": timeouts,
     }
+    if override_meta:
+        results["overrides"] = override_meta
 
-    # Save in run dir, not inside checkpoints/
-    results_dir = checkpoint_path.parent
-    if results_dir.name == "checkpoints":
-        results_dir = results_dir.parent
-    results_path = results_dir / "eval_results.json"
+    if args.output:
+        results_path = Path(args.output)
+        results_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        results_dir = checkpoint_path.parent
+        if results_dir.name == "checkpoints":
+            results_dir = results_dir.parent
+        results_path = results_dir / "eval_results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Results saved to: {results_path}")

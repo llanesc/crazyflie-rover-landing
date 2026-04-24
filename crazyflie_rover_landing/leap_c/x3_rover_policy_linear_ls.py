@@ -22,6 +22,7 @@ from crazyflie_rover_landing.leap_c.x3_rover_ocp_linear_ls import (
     _VX_MAX,
     _VY_MAX,
     _WZ_MAX,
+    _WHEEL_VEL_MAX,
 )
 
 
@@ -71,6 +72,7 @@ class X3RoverMPCLayerLinearLS(nn.Module):
         vx_max: float = _VX_MAX,
         vy_max: float = _VY_MAX,
         wz_max: float = _WZ_MAX,
+        wheel_vel_max: float | None = _WHEEL_VEL_MAX,
         n_batch_max: int = 128,
         num_threads: int = 8,
         activation: str = "relu",
@@ -88,6 +90,7 @@ class X3RoverMPCLayerLinearLS(nn.Module):
             vx_max=vx_max,
             vy_max=vy_max,
             wz_max=wz_max,
+            wheel_vel_max=wheel_vel_max,
         )
         self.planner = X3RoverPlanner(cfg=planner_cfg)
 
@@ -189,6 +192,7 @@ class X3RoverACMPCGaussianPolicy(GaussianMixin, Model):
         vx_max: float = _VX_MAX,
         vy_max: float = _VY_MAX,
         wz_max: float = _WZ_MAX,
+        wheel_vel_max: float | None = _WHEEL_VEL_MAX,
         n_batch_max: int = 128,
         num_threads: int = 8,
         activation: str = "relu",
@@ -215,6 +219,7 @@ class X3RoverACMPCGaussianPolicy(GaussianMixin, Model):
             vx_max=vx_max,
             vy_max=vy_max,
             wz_max=wz_max,
+            wheel_vel_max=wheel_vel_max,
             n_batch_max=n_batch_max,
             num_threads=num_threads,
             activation=activation,

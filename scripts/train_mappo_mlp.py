@@ -440,6 +440,7 @@ def main():
     env_config = {
         "policy_type": "mlp",
         "experiment_name": args.experiment,
+        "rover_type": env_cfg.rover_type,
         "drone_model": env_cfg.drone_model,
         "n_worlds": n_worlds,
         "sim_freq": env_cfg.sim_freq,
@@ -448,7 +449,11 @@ def main():
         "map_size_x": env_cfg.map_size_x,
         "map_size_y": env_cfg.map_size_y,
         "rover_max_speed": env_cfg.rover_max_speed,
+        "rover_vx_max": env_cfg.rover_vx_max,
+        "rover_vy_max": env_cfg.rover_vy_max,
+        "rover_wz_max": env_cfg.rover_wz_max,
         "rover_platform_radius": env_cfg.rover_platform_radius,
+        "rover_height": env_cfg.rover_height,
         "landing_z_tol": env_cfg.landing_z_tol,
         "landing_vel_xy_tol": env_cfg.landing_vel_xy_tol,
         "landing_vel_z_tol": env_cfg.landing_vel_z_tol,
@@ -461,16 +466,17 @@ def main():
         "drone_policy": {
             "hidden_sizes": d_cfg["hidden_sizes"],
             "activation": d_cfg["activation"],
+            "initial_log_std": d_cfg.get("initial_log_std", -1.2),
+            "roll_pitch_max": d_cfg.get("roll_pitch_max", 0.5),
+            "yaw_max": d_cfg.get("yaw_max", 0.5),
         },
         "rover_policy": {
             "hidden_sizes": r_cfg["hidden_sizes"],
             "activation": r_cfg["activation"],
+            "initial_log_std": r_cfg.get("initial_log_std", -1.2),
         },
-        "curriculum_levels": (
-            [{"name": lvl.name, "params": lvl.params, "spawn": lvl.spawn}
-             for lvl in curriculum_cfg.levels]
-            if curriculum_cfg is not None else None
-        ),
+        "value_net_sizes": policy_cfg.get("value_net_sizes", [256, 256]),
+        "value_activation": policy_cfg.get("value_activation", "relu"),
     }
     with open(experiment_dir / "environment_config.json", "w") as f:
         json.dump(env_config, f, indent=2)
@@ -678,6 +684,24 @@ def main():
             "gamma", "gae_lambda", "grad_norm_clip", "entropy_loss_scale",
             "value_loss_scale", "ratio_clip", "value_clip", "kl_threshold",
         )},
+        "preprocessors": {
+            "observation": training_cfg.get("observation_preprocessor"),
+            "state": training_cfg.get("state_preprocessor"),
+            "value": training_cfg.get("value_preprocessor"),
+        },
+        "rewards": config.get("rewards", {}),
+        "curriculum": {
+            "enabled": curriculum_cfg is not None,
+            "levels": (
+                [{"name": lvl.name, "params": lvl.params, "spawn": lvl.spawn}
+                 for lvl in curriculum_cfg.levels]
+                if curriculum_cfg is not None else []
+            ),
+            "advance_threshold": curriculum_cfg.advance_threshold if curriculum_cfg else None,
+            "regression_threshold": curriculum_cfg.regression_threshold if curriculum_cfg else None,
+            "window_size": curriculum_cfg.window_size if curriculum_cfg else None,
+            "allow_regression": curriculum_cfg.allow_regression if curriculum_cfg else None,
+        },
         "start_time": start_time_str,
         "resumed_from_run": args.resume_run,
         "initial_curriculum_level": args.curriculum_level,

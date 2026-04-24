@@ -9,6 +9,7 @@ from crazyflie_rover_landing.utils.experiment_config import (
     get_policy_config,
     find_experiment_path,
 )
+from crazyflie_rover_landing.utils.override import apply_overrides
 
 __all__ = [
     "CurriculumManager",
@@ -19,4 +20,5 @@ __all__ = [
     "get_training_config",
     "get_policy_config",
     "find_experiment_path",
+    "apply_overrides",
 ]
