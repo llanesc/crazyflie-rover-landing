@@ -91,6 +91,7 @@ private:
 
   // UI elements
   QLabel * status_value_;
+  QLabel * policy_value_;
   QLabel * distance_value_;
   QLabel * rel_pos_value_;
   QPushButton * takeoff_btn_;

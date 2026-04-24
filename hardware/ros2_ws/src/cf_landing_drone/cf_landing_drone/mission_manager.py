@@ -318,6 +318,8 @@ class MissionManager(Node):
     def _publish_status(self):
         msg = MissionStatus()
         msg.status = self.status
+        msg.drone_policy_ready = self.drone_policy_ready
+        msg.rover_policy_ready = self.rover_policy_ready
         self.status_pub.publish(msg)
 
     def _publish_markers(self):

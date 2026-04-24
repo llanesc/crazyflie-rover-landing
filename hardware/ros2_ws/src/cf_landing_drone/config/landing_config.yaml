@@ -5,7 +5,7 @@ drone_mode: sim          # sim | hw
 rover_mode: sim          # sim | hw
 
 # Policy type
-policy_type: mlp         # acmpc | mlp
+policy_type: acmpc       # acmpc | mlp
 stochastic_policy: false # if true, sample from distribution instead of using mean
 
 # Agent names

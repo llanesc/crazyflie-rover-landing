@@ -153,6 +153,12 @@ void LandingPanel::setupUI()
   status_layout->addWidget(status_value_);
   status_layout->addStretch();
 
+  auto * policy_label = new QLabel("Policy:");
+  policy_value_ = new QLabel("NOT READY");
+  policy_value_->setStyleSheet("color: #f44336; font-weight: bold;");
+  status_layout->addWidget(policy_label);
+  status_layout->addWidget(policy_value_);
+
   main_layout->addWidget(status_group);
 
   // ── Landing Info ──
@@ -366,14 +372,33 @@ void LandingPanel::updateUI()
     status_value_->setText(text);
     status_value_->setStyleSheet(QString("color: %1; font-weight: bold;").arg(color));
 
+    // Policy readiness
+    bool policies_ready = latest_status_->drone_policy_ready && latest_status_->rover_policy_ready;
+    if (policies_ready) {
+      policy_value_->setText("READY");
+      policy_value_->setStyleSheet("color: #4CAF50; font-weight: bold;");
+    } else {
+      QString waiting;
+      if (!latest_status_->drone_policy_ready && !latest_status_->rover_policy_ready)
+        waiting = "NOT READY (drone, rover)";
+      else if (!latest_status_->drone_policy_ready)
+        waiting = "NOT READY (drone)";
+      else
+        waiting = "NOT READY (rover)";
+      policy_value_->setText(waiting);
+      policy_value_->setStyleSheet("color: #f44336; font-weight: bold;");
+    }
+
     // Button enablement
-    takeoff_btn_->setEnabled(s == MS::STATUS_OFF);
+    takeoff_btn_->setEnabled(s == MS::STATUS_OFF && policies_ready);
     run_btn_->setEnabled(s == MS::STATUS_HOVER);
     abort_btn_->setEnabled(s == MS::STATUS_RUN || s == MS::STATUS_TAKEOFF || s == MS::STATUS_HOVER);
     off_btn_->setEnabled(s != MS::STATUS_OFF);
   } else {
     status_value_->setText("DISCONNECTED");
     status_value_->setStyleSheet("color: #666; font-weight: bold;");
+    policy_value_->setText("NOT READY");
+    policy_value_->setStyleSheet("color: #f44336; font-weight: bold;");
     takeoff_btn_->setEnabled(false);
     run_btn_->setEnabled(false);
     abort_btn_->setEnabled(false);

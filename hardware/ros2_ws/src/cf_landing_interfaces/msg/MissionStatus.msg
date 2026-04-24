@@ -6,3 +6,5 @@ uint8 STATUS_LANDED = 4
 uint8 STATUS_ABORT = 5
 
 uint8 status
+bool drone_policy_ready
+bool rover_policy_ready

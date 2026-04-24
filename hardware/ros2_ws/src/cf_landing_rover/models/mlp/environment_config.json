@@ -1,7 +1,7 @@
 {
   "policy_type": "mlp",
   "experiment_name": "X3",
-  "drone_model": "cf21B_500",
+  "drone_model": "cf2x_T350",
   "n_worlds": 128,
   "sim_freq": 500,
   "control_freq": 50,
@@ -9,11 +9,13 @@
   "map_size_x": 15.0,
   "map_size_y": 15.0,
   "rover_max_speed": 1.0,
-  "rover_platform_radius": 0.115,
+  "rover_platform_radius": 0.127,
   "landing_z_tol": 0.05,
   "landing_vel_xy_tol": 0.1,
   "landing_vel_z_tol": 0.08,
   "landing_attitude_tol": 0.05,
+  "disturbance_type": "ou",
+  "disturbance_ou_theta": 0.5,
   "drone_obs_dim": 29,
   "rover_obs_dim": 15,
   "shared_state_dim": 24,
@@ -101,7 +103,7 @@
         "inertia_randomization_std": 1e-06,
         "enable_disturbance": true,
         "disturbance_force_std": 0.005,
-        "disturbance_torque_std": 0.0001
+        "disturbance_torque_std": 5e-05
       },
       "spawn": {
         "drone": {
@@ -128,8 +130,8 @@
         "mass_randomization_std": 0.002,
         "inertia_randomization_std": 1e-06,
         "enable_disturbance": true,
-        "disturbance_force_std": 0.01,
-        "disturbance_torque_std": 0.0003
+        "disturbance_force_std": 0.005,
+        "disturbance_torque_std": 5e-05
       },
       "spawn": {
         "drone": {
@@ -156,8 +158,8 @@
         "mass_randomization_std": 0.005,
         "inertia_randomization_std": 1e-06,
         "enable_disturbance": true,
-        "disturbance_force_std": 0.02,
-        "disturbance_torque_std": 0.0005
+        "disturbance_force_std": 0.005,
+        "disturbance_torque_std": 5e-05
       },
       "spawn": {
         "drone": {
