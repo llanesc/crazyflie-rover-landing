@@ -44,6 +44,10 @@ hardware/ros2_ws/src/crazyswarm2/
 hardware/ros2_ws/src/yahboomcar_description/
 hardware/local_env_hardware/
 
+# Sweeps
+sweeps/*.yaml
+sweeps/*.csv
+
 # Misc
 log*.csv
 params*.csv
