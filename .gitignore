@@ -19,6 +19,9 @@ local_env_hardware/
 external/*/__pycache__/
 external/*/build/
 
+# Media
+*.gif
+
 # OS
 .DS_Store
 
