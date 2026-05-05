@@ -271,6 +271,7 @@ def get_policy_config(config: dict) -> dict:
             "pos_offset_max": rover_cfg.get("pos_offset_max", 2.0),
             "initial_log_std": rover_cfg.get("initial_log_std", shared_log_std),
             "activation": rover_cfg.get("activation", shared_cost_activation),
+            "wheel_dynamics": rover_cfg.get("wheel_dynamics", False),
         },
         "value_net_sizes": policy_cfg.get("value_net_sizes", [256, 256]),
         "value_activation": policy_cfg.get("value_activation", "relu"),

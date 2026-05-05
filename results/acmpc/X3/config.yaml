@@ -73,7 +73,7 @@ policy:
   cost_net_activation: "relu"
   value_activation: "relu"
   drone:
-    mpc_horizon: 2
+    mpc_horizon: 5
     mpc_dt: 0.02
     cost_net_sizes: [256, 256]
     state_type: "quat"         # "euler" (12D) or "quat" (13D quat+body rates)
@@ -83,7 +83,7 @@ policy:
     pos_offset_max: 0.25
     initial_log_std: [-0.5, -0.5, -1.0, -1.3]
   rover:
-    mpc_horizon: 2
+    mpc_horizon: 5
     mpc_dt: 0.02
     cost_net_sizes: [256, 256]
     pos_offset_max: 0.25

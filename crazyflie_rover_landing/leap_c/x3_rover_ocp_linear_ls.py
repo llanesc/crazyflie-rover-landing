@@ -264,7 +264,10 @@ def export_x3_rover_ocp_linear_ls(
     ocp.dims.nx = NX_ROVER
     ocp.dims.nu = NU_ROVER
 
-    x_next, x, u = define_mecanum_dynamics(dt, wheel_vel_max=wheel_vel_max)
+    # Always use smooth (simple) dynamics — wheel saturation is handled
+    # via linear inequality constraints on the controls, not via clipping
+    # inside the ODE (which creates non-smooth kinks that break SQP).
+    x_next, x, u = define_mecanum_dynamics(dt, wheel_vel_max=None)
     ocp.model.x = x
     ocp.model.u = u
     ocp.model.disc_dyn_expr = x_next
@@ -302,6 +305,25 @@ def export_x3_rover_ocp_linear_ls(
     ocp.constraints.lbx_e  = np.array([-1., -1., -vx_max, -vy_max, -wz_max])
     ocp.constraints.ubx_e  = np.array([ 1.,  1.,  vx_max,  vy_max,  wz_max])
     ocp.constraints.idxbx_e = np.array([2, 3, 4, 5, 6])
+
+    # Wheel speed constraints as linear inequalities on controls.
+    # Inverse kinematics is linear: ω_wheel = D_wheel @ u, so wheel
+    # limits become  -ω_max ≤ D_wheel @ u ≤ ω_max.
+    # This lets the solver reason about motor saturation explicitly
+    # instead of hiding it as non-smooth clipping inside the dynamics.
+    if wheel_vel_max is not None:
+        r_inv = 1.0 / _WHEEL_RADIUS
+        D_wheel = r_inv * np.array([
+            [ 1., -1., -_K],   # front-left
+            [ 1.,  1.,  _K],   # front-right
+            [ 1.,  1., -_K],   # back-left
+            [ 1., -1.,  _K],   # back-right
+        ])
+        C_wheel = np.zeros((4, NX_ROVER))
+        ocp.constraints.C = C_wheel
+        ocp.constraints.D = D_wheel
+        ocp.constraints.lg = -wheel_vel_max * np.ones(4)
+        ocp.constraints.ug =  wheel_vel_max * np.ones(4)
 
     ocp.solver_options.qp_solver            = "PARTIAL_CONDENSING_HPIPM"
     ocp.solver_options.hessian_approx       = "EXACT"
